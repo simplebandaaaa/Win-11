@@ -26,7 +26,7 @@ jobs:
           
           # Agar aapne secret set nahi kiya, toh ye ek default strong password rakh lega fallback ke liye
           if ([string]::IsNullOrEmpty($password)) {
-              $password = "SecurePass@2026!"
+              $password = "SecureUmesh@987"
           }
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
