@@ -9,29 +9,41 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Configure RDP, Audio, and Mic Settings
+      - name: Configure RDP, Sound and Mic Redirection
         run: |
+          # 1. RDP Core Settings
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           
+          # 2. RDP Tcp Registry Fixes for Audio/Mic
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudio" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudioCapture" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32' -Name "wavemapper" -Value "msacm32.drv" -Force
 
+          # 3. Group Policy Override (Isse "No input devices found" fix hota hai)
+          $tsPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+          if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force }
+          Set-ItemProperty -Path $tsPath -Name "fDisableAudioCapture" -Value 0 -Force
+
+          # 4. Windows Audio Services Enable & Start
           Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
           Start-Service -Name "AudioEndpointBuilder"
           Set-Service -Name "Audiosrv" -StartupType Automatic
           Start-Service -Name "Audiosrv"
 
+          # 5. Firewall Settings
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service -Name TermService -Force
+
+      - name: Install VB-Audio Virtual Cable (Virtual Mic Driver)
+        run: |
+          # Virtual Audio Driver install kar rahe hain taaki Windows Input Device recognize kare
+          choco install vb-cable -y --no-progress
 
       - name: Create RDP User
         run: |
           $password = "${{ secrets.MY_RDP_PASSWORD }}"
           if ([string]::IsNullOrEmpty($password)) {
               $password = "SecurePass@2026!"
-              Write-Host "Secret nahi mila. Default password set ho gaya hai."
           }
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -41,9 +53,8 @@ jobs:
           
           "RDP_PASS_DISPLAY=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install & Connect Tailscale (Latest Auto-Download)
+      - name: Install & Connect Tailscale
         run: |
-          # Dynamic Latest Version Download Fix
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
@@ -51,7 +62,6 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
-          # Tailscale Connect
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
           $tsIP = $null
@@ -63,7 +73,7 @@ jobs:
           }
           
           if (-not $tsIP) {
-              Write-Error "Tailscale IP nahi mila! Kripya TAILSCALE_AUTH_KEY secret check karein."
+              Write-Error "Tailscale IP nahi mila."
               exit 1
           }
           
