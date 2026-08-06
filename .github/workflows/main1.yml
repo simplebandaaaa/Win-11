@@ -1,0 +1,87 @@
+name: RDP Access with Audio and Mic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360 # GitHub hosted runners ki max limit 6 hours hai
+
+    steps:
+      - name: Configure RDP, Audio, and Mic Settings
+        run: |
+          # 1. Core RDP Setup Enable Karna
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
+          
+          # 2. Audio Playback aur Mic Redirection Enable Karna
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudio" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudioCapture" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32' -Name "wavemapper" -Value "msacm32.drv" -Force
+
+          # 3. Required Windows Audio Services Start Karna
+          Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
+          Start-Service -Name "AudioEndpointBuilder"
+          Set-Service -Name "Audiosrv" -StartupType Automatic
+          Start-Service -Name "Audiosrv"
+
+          # 4. Windows Firewall Rules
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User
+        run: |
+          $password = "${{ secrets.MY_RDP_PASSWORD }}"
+          
+          if ([string]::IsNullOrEmpty($password)) {
+              Write-Error "CRITICAL ERROR: Secret 'MY_RDP_PASSWORD' set nahi hai!"
+              exit 1
+          }
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
+      - name: Install & Connect Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP nahi mila. Exiting."
+              exit 1
+          }
+          
+          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Keep Alive Loop
+        run: |
+          Write-Host "================================="
+          Write-Host "   RDP ACCESS DETAILS READY      "
+          Write-Host "================================="
+          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "Username     : RDP"
+          Write-Host "Password     : [Hidden in GitHub Secrets]"
+          Write-Host "================================="
+          
+          $counter = 0
+          while ($true) {
+              Start-Sleep -Seconds 300
+              $counter += 5
+              Write-Host "Session active for $counter minutes..."
+          }
