@@ -1,4 +1,4 @@
-name: RDP Access with Audio and Mic
+name: RDP Access with Working Mic
 
 on:
   workflow_dispatch:
@@ -9,35 +9,38 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Configure RDP, Sound and Mic Redirection
+      - name: Install Virtual Audio Driver & Configure Mic Policies
         run: |
-          # 1. RDP Core Settings
+          # 1. Choco se Virtual Audio Driver install karein
+          choco install vb-cable -y --no-progress
+
+          # 2. RDP Core Settings
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           
-          # 2. RDP Tcp Registry Fixes for Audio/Mic
+          # 3. Enable Audio Playback & Mic Redirection
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudio" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudioCapture" -Value 0 -Force
 
-          # 3. Group Policy Override (Isse "No input devices found" fix hota hai)
+          # 4. Group Policy Override for Audio Input
           $tsPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
           if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force }
           Set-ItemProperty -Path $tsPath -Name "fDisableAudioCapture" -Value 0 -Force
 
-          # 4. Windows Audio Services Enable & Start
+          # 5. Windows Microphone Privacy Unblock (Allow Apps Access)
+          $micPriv = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+          if (-not (Test-Path $micPriv)) { New-Item -Path $micPriv -Force }
+          Set-ItemProperty -Path $micPriv -Name "Value" -Value "Allow" -Force
+
+          # 6. Windows Audio Services Enable & Restart
           Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
           Start-Service -Name "AudioEndpointBuilder"
           Set-Service -Name "Audiosrv" -StartupType Automatic
           Start-Service -Name "Audiosrv"
 
-          # 5. Firewall Settings
+          # 7. Firewall Rules
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service -Name TermService -Force
-
-      - name: Install VB-Audio Virtual Cable (Virtual Mic Driver)
-        run: |
-          # Virtual Audio Driver install kar rahe hain taaki Windows Input Device recognize kare
-          choco install vb-cable -y --no-progress
 
       - name: Create RDP User
         run: |
