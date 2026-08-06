@@ -6,27 +6,27 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360 # GitHub hosted runners ki max limit 6 hours hai
+    timeout-minutes: 360 # GitHub hosted runners limit
 
     steps:
       - name: Configure RDP, Audio, and Mic Settings
         run: |
-          # 1. Core RDP Setup Enable Karna
+          # 1. Core RDP Setup Enable
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
           
-          # 2. Audio Playback aur Mic Redirection Enable Karna
+          # 2. Audio Playback aur Mic Redirection Enable
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudio" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudioCapture" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32' -Name "wavemapper" -Value "msacm32.drv" -Force
 
-          # 3. Required Windows Audio Services Start Karna
+          # 3. Windows Audio Services Start
           Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
           Start-Service -Name "AudioEndpointBuilder"
           Set-Service -Name "Audiosrv" -StartupType Automatic
           Start-Service -Name "Audiosrv"
 
-          # 4. Windows Firewall Rules
+          # 4. Windows Firewall Settings
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service -Name TermService -Force
 
@@ -34,15 +34,19 @@ jobs:
         run: |
           $password = "${{ secrets.MY_RDP_PASSWORD }}"
           
+          # Agar Secret set nahi hai toh ye fallback password use karega
           if ([string]::IsNullOrEmpty($password)) {
-              Write-Error "CRITICAL ERROR: Secret 'MY_RDP_PASSWORD' set nahi hai!"
-              exit 1
+              $password = "SecurePass@2026!"
+              Write-Host "NOTE: MY_RDP_PASSWORD secret nahi mila. Default password set ho gaya hai."
           }
 
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          # Pass ko env me save kar rahe hain display ke liye
+          "RDP_PASS_DISPLAY=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install & Connect Tailscale
         run: |
@@ -76,7 +80,7 @@ jobs:
           Write-Host "================================="
           Write-Host "Tailscale IP : $env:TAILSCALE_IP"
           Write-Host "Username     : RDP"
-          Write-Host "Password     : [Hidden in GitHub Secrets]"
+          Write-Host "Password     : $env:RDP_PASS_DISPLAY"
           Write-Host "================================="
           
           $counter = 0
