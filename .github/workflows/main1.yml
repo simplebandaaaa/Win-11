@@ -1,4 +1,4 @@
-name: RDP Fast Firefox
+name: RDP Fast Firefox MaxSpeed
 on: workflow_dispatch
 
 jobs:
@@ -15,9 +15,12 @@ jobs:
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
-      - name: Optimize Windows Visuals for Maximum Speed
+      - name: Optimize Network & Windows for Max Bandwidth
         run: |
-          # Set Windows Visual Effects to Best Performance (Disable animations/shadows)
+          # Set TCP Auto-Tuning to unlock maximum network speed
+          netsh int tcp set global autotuninglevel=normal
+          
+          # Set Windows Visual Effects to Best Performance
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name VisualFXSetting -Value 2 -Force
 
       - name: Create RDP User with Custom Password
@@ -30,22 +33,25 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install & Optimize Firefox
+      - name: Install Firefox & Max-Speed Tools
         run: |
-          # Silent Install Firefox
+          # Install Firefox and aria2 (for multi-threaded fast downloads)
           winget install --id Mozilla.Firefox -e --source winget --accept-package-agreements --accept-source-agreements
+          winget install --id aria2.aria2 -e --source winget --accept-package-agreements --accept-source-agreements
 
           # Pre-configure Firefox Profile for Low-Latency & High Speed
           $ffProfileDir = "$env:APPDATA\Mozilla\Firefox\Profiles\fast.default-release"
           New-Item -Path $ffProfileDir -ItemType Directory -Force | Out-Null
           
-          # Force Disable Hardware Acceleration & Enable WebRender fallback to stop RDP lag
+          # Disable Hardware Acceleration & WebRender to prevent RDP lag
           $userJsPath = "$ffProfileDir\user.js"
           @'
           user_pref("layers.acceleration.disabled", true);
           user_pref("gfx.webrender.force-disabled", true);
           user_pref("toolkit.cosmeticAnimations.enabled", false);
           user_pref("browser.preferences.defaultPerformanceSettings.enabled", false);
+          user_pref("network.http.max-connections", 1500);
+          user_pref("network.http.max-persistent-connections-per-server", 10);
           '@ | Out-File -FilePath $userJsPath -Encoding utf8 -Force
 
           # Create Profiles file
