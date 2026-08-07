@@ -1,4 +1,4 @@
-name: RDP Access with Fixed Audio Device
+name: Optimized Fast RDP with Fast Chrome
 
 on:
   workflow_dispatch:
@@ -6,62 +6,82 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Install VB-Audio Driver & Configure RDP
+      - name: Optimize Windows Settings for High Speed
         run: |
-          # 1. Virtual Audio Cable Install
-          choco install vb-cable -y --no-progress
-
-          # 2. RDP Core & Audio Settings
+          # Enable RDP & NLA Security
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudio" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "fDisableAudioCapture" -Value 0 -Force
 
-          # 3. Audio Services Start
-          Set-Service -Name "AudioEndpointBuilder" -StartupType Automatic
-          Start-Service -Name "AudioEndpointBuilder"
-          Set-Service -Name "Audiosrv" -StartupType Automatic
-          Start-Service -Name "Audiosrv"
+          # Maximize RDP Performance (Disable Visual Effects)
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop' -Name "SCRNSAVE.EXE" -Value "" -Force
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name "VisualFXSetting" -Value 2 -Force
+          
+          # Disable Windows Services for low CPU usage
+          Set-Service -Name "SysMain" -StartupType Disabled -ErrorAction SilentlyContinue
+          Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          # Firewall Config
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
+
+      - name: Install and Speed Up Chrome
+        run: |
+          # Download and Install Chrome silently
+          $chromeUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
+          $chromePath = "$env:TEMP\chrome_installer.exe"
+          Invoke-WebRequest -Uri $chromeUrl -OutFile $chromePath
+          Start-Process $chromePath -ArgumentList "/silent", "/install" -Wait
+          Remove-Item $chromePath -Force
+
+          # Chrome Policy Optimization (Low Memory, No Background Apps, Fast Rendering)
+          $policyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
+          if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force }
+          
+          Set-ItemProperty -Path $policyPath -Name "BackgroundModeEnabled" -Value 0 -Force
+          Set-ItemProperty -Path $policyPath -Name "HardwareAccelerationModeEnabled" -Value 0 -Force
+          Set-ItemProperty -Path $policyPath -Name "MetricsReportingEnabled" -Value 0 -Force
 
       - name: Create RDP User
         run: |
           $password = "${{ secrets.MY_RDP_PASSWORD }}"
-          if ([string]::IsNullOrEmpty($password)) { $password = "SecurePass@2026!" }
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          "RDP_PASS_DISPLAY=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if ([string]::IsNullOrEmpty($password)) {
+              $password = "SecurePass@2026!"
+          }
 
-      - name: Install & Connect Tailscale
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
+      - name: Connect Tailscale
+        run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
           
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 15) {
+          while (-not $tsIP -and $retries -lt 10) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
+              Start-Sleep -Seconds 3
               $retries++
           }
-          if (-not $tsIP) { exit 1 }
           "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Keep Alive Loop
+      - name: Maintain Session
         run: |
-          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
-          Write-Host "Username     : RDP"
-          Write-Host "Password     : $env:RDP_PASS_DISPLAY"
-          while ($true) { Start-Sleep -Seconds 300 }
+          Write-Host "RDP Ready! Connect via Tailscale IP: $env:TAILSCALE_IP"
+          while ($true) {
+              Start-Sleep -Seconds 300
+          }
