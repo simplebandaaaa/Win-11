@@ -15,8 +15,14 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1 -Force
 
+          # Create registry paths if they don't exist (Fixes Path Error)
+          $desktopPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"
+          if (-not (Test-Path $desktopPolicyPath)) { 
+              New-Item -Path $desktopPolicyPath -Force 
+          }
+
           # Maximize RDP Performance (Disable Visual Effects)
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop' -Name "SCRNSAVE.EXE" -Value "" -Force
+          Set-ItemProperty -Path $desktopPolicyPath -Name "SCRNSAVE.EXE" -Value "" -Force
           Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name "VisualFXSetting" -Value 2 -Force
           
           # Disable Windows Services for low CPU usage
@@ -38,9 +44,11 @@ jobs:
           Start-Process $chromePath -ArgumentList "/silent", "/install" -Wait
           Remove-Item $chromePath -Force
 
-          # Chrome Policy Optimization (Low Memory, No Background Apps, Fast Rendering)
+          # Chrome Policy Optimization
           $policyPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-          if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force }
+          if (-not (Test-Path $policyPath)) { 
+              New-Item -Path $policyPath -Force 
+          }
           
           Set-ItemProperty -Path $policyPath -Name "BackgroundModeEnabled" -Value 0 -Force
           Set-ItemProperty -Path $policyPath -Name "HardwareAccelerationModeEnabled" -Value 0 -Force
