@@ -1,115 +1,64 @@
-name: RDP Fast Firefox MaxSpeed
-on: workflow_dispatch
+name: macOS Remote Desktop
+
+on:
+  workflow_dispatch:
 
 jobs:
-  secure-rdp:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  macos-remote:
+    runs-on: macos-latest
+    timeout-minutes: 350
+
     steps:
-      - name: Configure Core RDP Settings
+      - name: Setup Tailscale
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
+          brew install --quiet tailscale
+          sudo brew services stop tailscale 2>/dev/null || true
+          sudo brew services start tailscale
 
-      - name: Optimize Network & Windows for Max Bandwidth
+          sleep 5
+
+          sudo tailscale up \
+            --auth-key="${{ secrets.TS_AUTHKEY }}" \
+            --hostname="github-macos-${{ github.run_id }}"
+
+      - name: Configure macOS Screen Sharing
         run: |
-          # Set TCP Auto-Tuning to unlock maximum network speed
-          netsh int tcp set global autotuninglevel=normal
-          
-          # Set Windows Visual Effects to Best Performance
-          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name VisualFXSetting -Value 2 -Force
+          CURRENT_USER=$(stat -f "%Su" /dev/console)
 
-      - name: Create RDP User with Custom Password
+          echo "User: $CURRENT_USER"
+
+          # Enable Remote Management / Screen Sharing
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent -privs -all
+
+          # Enable SSH as backup
+          sudo systemsetup -setremotelogin on || true
+
+          echo "Remote services configured."
+
+      - name: Show Tailscale Address
         run: |
-          $password = "${{ secrets.MY_RDP_PASSWORD }}"
-          if ([string]::IsNullOrEmpty($password)) { $password = "SecurePass@2026!" }
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          "RDP_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "======================================"
+          echo " TAILSCALE IP"
+          echo "======================================"
 
-      - name: Install Firefox & Max-Speed Tools
+          tailscale ip -4
+          tailscale status
+
+          echo "======================================"
+          echo "Use a VNC client:"
+          echo "vnc://TAILSCALE_IP:5900"
+          echo "======================================"
+
+      - name: Keep macOS Runner Alive
         run: |
-          # Install Firefox and aria2 (for multi-threaded fast downloads)
-          winget install --id Mozilla.Firefox -e --source winget --accept-package-agreements --accept-source-agreements
-          winget install --id aria2.aria2 -e --source winget --accept-package-agreements --accept-source-agreements
+          echo "macOS remote session is running..."
+          echo "Press Cancel/Stop in GitHub Actions to terminate."
 
-          # Pre-configure Firefox Profile for Low-Latency & High Speed
-          $ffProfileDir = "$env:APPDATA\Mozilla\Firefox\Profiles\fast.default-release"
-          New-Item -Path $ffProfileDir -ItemType Directory -Force | Out-Null
-          
-          # Disable Hardware Acceleration & WebRender to prevent RDP lag
-          $userJsPath = "$ffProfileDir\user.js"
-          @'
-          user_pref("layers.acceleration.disabled", true);
-          user_pref("gfx.webrender.force-disabled", true);
-          user_pref("toolkit.cosmeticAnimations.enabled", false);
-          user_pref("browser.preferences.defaultPerformanceSettings.enabled", false);
-          user_pref("network.http.max-connections", 1500);
-          user_pref("network.http.max-persistent-connections-per-server", 10);
-          '@ | Out-File -FilePath $userJsPath -Encoding utf8 -Force
-
-          # Create Profiles file
-          $profilesIni = "$env:APPDATA\Mozilla\Firefox\profiles.ini"
-          @'
-          [Profile0]
-          Name=default-release
-          IsRelative=1
-          Path=Profiles/fast.default-release
-          Default=1
-
-          [General]
-          StartWithLastProfile=1
-          Version=2
-          '@ | Out-File -FilePath $profilesIni -Encoding utf8 -Force
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            Start-Sleep -Seconds 5
-            $retries++
-          }
-          if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
-            exit 1
-          }
-          "TAILSCALE_IP=$tsIP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-            Write-Error "TCP connection to RDP port 3389 failed"
-            exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "==================`n"
-          while ($true) {
-            Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
-            Start-Sleep -Seconds 300
-          }
+          while true; do
+            echo "[$(date)] Remote session alive"
+            sleep 300
+          done
