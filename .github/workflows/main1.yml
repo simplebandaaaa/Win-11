@@ -9,56 +9,65 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Setup Tailscale
+      - name: Install Tailscale
         run: |
           brew install --quiet tailscale
-          sudo brew services stop tailscale 2>/dev/null || true
           sudo brew services start tailscale
-
           sleep 5
 
           sudo tailscale up \
             --auth-key="${{ secrets.TS_AUTHKEY }}" \
             --hostname="github-macos-${{ github.run_id }}"
 
-      - name: Configure macOS Screen Sharing
+      - name: Create Remote User
         run: |
-          CURRENT_USER=$(stat -f "%Su" /dev/console)
+          USERNAME="remote"
+          PASSWORD='Mac@12345'
 
-          echo "User: $CURRENT_USER"
+          # Create user
+          sudo sysadminctl \
+            -addUser "$USERNAME" \
+            -fullName "Remote User" \
+            -password "$PASSWORD" \
+            -admin
 
-          # Enable Remote Management / Screen Sharing
+          echo "Remote user created."
+
+      - name: Enable Screen Sharing
+        run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -restart -agent -privs -all
+            -configure \
+            -access -on \
+            -configure \
+            -users remote \
+            -configure \
+            -privs -all \
+            -restart \
+            -agent
 
-          # Enable SSH as backup
-          sudo systemsetup -setremotelogin on || true
+          echo "Screen Sharing enabled."
 
-          echo "Remote services configured."
-
-      - name: Show Tailscale Address
+      - name: Show Connection Details
         run: |
           echo "======================================"
-          echo " TAILSCALE IP"
+          echo " MACOS REMOTE DESKTOP"
           echo "======================================"
 
-          tailscale ip -4
+          IP=$(tailscale ip -4)
+
+          echo "Tailscale IP : $IP"
+          echo "Username     : remote"
+          echo "Password     : Mac@12345"
+          echo "VNC Address  : $IP:5900"
+
+          echo "======================================"
+
           tailscale status
 
-          echo "======================================"
-          echo "Use a VNC client:"
-          echo "vnc://TAILSCALE_IP:5900"
-          echo "======================================"
-
-      - name: Keep macOS Runner Alive
+      - name: Keep Session Alive
         run: |
-          echo "macOS remote session is running..."
-          echo "Press Cancel/Stop in GitHub Actions to terminate."
-
           while true; do
-            echo "[$(date)] Remote session alive"
+            echo "[$(date)] macOS session running..."
             sleep 300
           done
