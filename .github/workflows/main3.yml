@@ -11,7 +11,7 @@ jobs:
     steps:
 
       # ==========================================
-      # 1. Configure RDP
+      # 1. Configure Windows RDP
       # ==========================================
       - name: Configure Windows RDP
         shell: powershell
@@ -48,11 +48,11 @@ jobs:
             localport=3389
 
           Set-Service `
-            -Name TermService `
+            -Name "TermService" `
             -StartupType Automatic
 
           Restart-Service `
-            -Name TermService `
+            -Name "TermService" `
             -Force
 
           Write-Host "RDP configured successfully."
@@ -81,10 +81,9 @@ jobs:
               }
             )
 
-          } else {
-
+          }
+          else {
             $password = $env:RDP_PASSWORD_SECRET
-
           }
 
           $securePassword = ConvertTo-SecureString `
@@ -104,7 +103,8 @@ jobs:
               -AccountNeverExpires `
               -PasswordNeverExpires
 
-          } else {
+          }
+          else {
 
             Set-LocalUser `
               -Name "RDP" `
@@ -127,7 +127,7 @@ jobs:
               -Encoding utf8 `
               -Append
 
-          Write-Host "RDP user created."
+          Write-Host "RDP user configured."
 
 
       # ==========================================
@@ -147,7 +147,8 @@ jobs:
           Invoke-WebRequest `
             -Uri $url `
             -OutFile $installer `
-            -UseBasicParsing
+            -UseBasicParsing `
+            -TimeoutSec 300
 
           if (!(Test-Path $installer)) {
             throw "Tailscale installer download failed."
@@ -155,14 +156,16 @@ jobs:
 
           Write-Host "Installing Tailscale..."
 
-          $p = Start-Process `
+          $process = Start-Process `
             -FilePath "msiexec.exe" `
             -ArgumentList "/i `"$installer`" /quiet /norestart" `
             -Wait `
             -PassThru
 
-          if ($p.ExitCode -ne 0) {
-            throw "Tailscale installation failed. Exit code: $($p.ExitCode)"
+          Write-Host "Tailscale installer exit code: $($process.ExitCode)"
+
+          if ($process.ExitCode -ne 0) {
+            throw "Tailscale installation failed."
           }
 
           Remove-Item `
@@ -173,10 +176,10 @@ jobs:
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           if (!(Test-Path $ts)) {
-            throw "tailscale.exe not found."
+            throw "tailscale.exe was not found after installation."
           }
 
-          Write-Host "Tailscale installed."
+          Write-Host "Tailscale installed successfully."
 
 
       # ==========================================
@@ -192,10 +195,12 @@ jobs:
             -ErrorAction SilentlyContinue
 
           if ($null -eq $service) {
-            throw "Tailscale service not found."
+            throw "Tailscale service was not found."
           }
 
           if ($service.Status -ne "Running") {
+
+            Write-Host "Starting Tailscale service..."
 
             Start-Service `
               -Name "Tailscale"
@@ -203,8 +208,10 @@ jobs:
             Start-Sleep -Seconds 5
           }
 
-          Write-Host "Tailscale service:"
-          Get-Service -Name "Tailscale"
+          $service = Get-Service `
+            -Name "Tailscale"
+
+          Write-Host "Tailscale service status: $($service.Status)"
 
 
       # ==========================================
@@ -218,10 +225,14 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "TAILSCALE_AUTH_KEY secret is missing."
+            throw "TAILSCALE_AUTH_KEY GitHub Secret is missing."
           }
 
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $ts)) {
+            throw "Tailscale executable not found."
+          }
 
           Write-Host "Connecting to Tailscale..."
 
@@ -233,24 +244,32 @@ jobs:
 
           if ($LASTEXITCODE -ne 0) {
 
-            Write-Host "Tailscale connection failed."
+            Write-Host ""
+            Write-Host "===== TAILSCALE STATUS ====="
 
             & $ts status
+
+            Write-Host ""
+            Write-Host "===== TAILSCALE NETCHECK ====="
+
             & $ts netcheck
 
-            throw "Tailscale up failed."
+            throw "Tailscale connection failed."
           }
 
-          Start-Sleep -Seconds 5
+          Write-Host ""
+          Write-Host "===== TAILSCALE STATUS ====="
 
-          Write-Host "Tailscale status:"
           & $ts status
+
+          Write-Host ""
+          Write-Host "Waiting for Tailscale IPv4..."
 
           $tsIP = $null
 
           for ($i = 1; $i -le 20; $i++) {
 
-            Write-Host "Getting Tailscale IP - attempt $i/20"
+            Write-Host "Attempt $i/20"
 
             $output = & $ts ip -4 2>&1
 
@@ -265,26 +284,33 @@ jobs:
               }
             }
 
-            if ($tsIP) {
+            if (![string]::IsNullOrWhiteSpace($tsIP)) {
               break
             }
 
             Start-Sleep -Seconds 3
           }
 
-          if (!$tsIP) {
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
 
-            Write-Host "Tailscale status:"
+            Write-Host ""
+            Write-Host "===== FINAL TAILSCALE STATUS ====="
+
             & $ts status
 
-            Write-Host "Tailscale netcheck:"
+            Write-Host ""
+            Write-Host "===== NETCHECK ====="
+
             & $ts netcheck
 
-            throw "Tailscale IPv4 was not assigned."
+            throw "Tailscale IPv4 address was not assigned."
           }
 
           Write-Host ""
-          Write-Host "Tailscale IP: $tsIP"
+          Write-Host "===================================="
+          Write-Host "Tailscale connected successfully"
+          Write-Host "IPv4: $tsIP"
+          Write-Host "===================================="
 
           "TAILSCALE_IP=$tsIP" |
             Out-File `
@@ -321,7 +347,6 @@ jobs:
             foreach ($path in $paths) {
 
               if (Test-Path $path) {
-
                 $qemu = Get-Item $path
                 break
               }
@@ -329,10 +354,10 @@ jobs:
           }
 
           if ($null -eq $qemu) {
-            throw "QEMU executable not found."
+            throw "QEMU executable was not found."
           }
 
-          Write-Host "QEMU:"
+          Write-Host "QEMU found:"
           Write-Host $qemu.Source
 
           "QEMU_PATH=$($qemu.Source)" |
@@ -343,27 +368,12 @@ jobs:
 
 
       # ==========================================
-      # 7. Download Android ISO
+      # 7. Download Android-x86 ISO
       # ==========================================
-      - name: Download Android ISO
+      - name: Download Android-x86
         shell: powershell
-        env:
-          ANDROID_ISO_URL: ${{ secrets.ANDROID_ISO_URL }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          if ([string]::IsNullOrWhiteSpace($env:ANDROID_ISO_URL)) {
-
-            throw @"
-          ANDROID_ISO_URL secret is missing.
-
-          Add this repository secret:
-
-          ANDROID_ISO_URL
-
-          It must contain a direct URL to an Android-x86 ISO.
-          "@
-          }
 
           $androidDir = "$env:GITHUB_WORKSPACE\android"
 
@@ -375,37 +385,62 @@ jobs:
 
           $iso = "$androidDir\android-x86.iso"
 
-          Write-Host "Downloading Android ISO..."
+          $url = "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download"
 
-          $headers = @{
-            "User-Agent" = "Mozilla/5.0"
-            "Accept" = "*/*"
+          Write-Host "Android ISO URL:"
+          Write-Host $url
+
+          $success = $false
+
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+
+            Write-Host ""
+            Write-Host "Download attempt $attempt/3"
+
+            try {
+
+              if (Test-Path $iso) {
+                Remove-Item $iso -Force
+              }
+
+              Invoke-WebRequest `
+                -Uri $url `
+                -OutFile $iso `
+                -UseBasicParsing `
+                -TimeoutSec 600
+
+              if (Test-Path $iso) {
+
+                $size = (Get-Item $iso).Length
+
+                Write-Host "Downloaded size: $size bytes"
+
+                if ($size -gt 100MB) {
+
+                  $success = $true
+                  break
+                }
+              }
+
+            }
+            catch {
+
+              Write-Host "Download error:"
+              Write-Host $_.Exception.Message
+            }
+
+            Start-Sleep -Seconds 5
           }
 
-          Invoke-WebRequest `
-            -Uri $env:ANDROID_ISO_URL `
-            -Headers $headers `
-            -OutFile $iso `
-            -UseBasicParsing `
-            -TimeoutSec 900
-
-          if (!(Test-Path $iso)) {
-            throw "Android ISO was not downloaded."
+          if (!$success) {
+            throw "Android-x86 ISO download failed after 3 attempts."
           }
 
-          $size = (Get-Item $iso).Length
-
-          Write-Host "Downloaded size: $size bytes"
-
-          if ($size -lt 100MB) {
-            throw "Downloaded file is too small to be an Android ISO."
-          }
-
-          Write-Host "Android ISO ready."
+          Write-Host "Android-x86 ISO downloaded successfully."
 
 
       # ==========================================
-      # 8. Create Android Disk
+      # 8. Create Android VM Disk
       # ==========================================
       - name: Create Android VM Disk
         shell: powershell
@@ -414,7 +449,7 @@ jobs:
 
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
-          Write-Host "Creating 16 GB QCOW2 disk..."
+          Write-Host "Creating 16 GB Android VM disk..."
 
           & qemu-img.exe `
             create `
@@ -427,10 +462,10 @@ jobs:
           }
 
           if (!(Test-Path $disk)) {
-            throw "Android disk was not created."
+            throw "Android VM disk was not created."
           }
 
-          Write-Host "Android disk created."
+          Write-Host "Android VM disk created successfully."
 
 
       # ==========================================
@@ -441,14 +476,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $qemu = $env:QEMU_PATH
-
           $iso = "$env:GITHUB_WORKSPACE\android\android-x86.iso"
 
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
+          $qemu = $env:QEMU_PATH
+
           if (!(Test-Path $qemu)) {
-            throw "QEMU not found."
+            throw "QEMU not found: $qemu"
           }
 
           if (!(Test-Path $iso)) {
@@ -456,7 +491,7 @@ jobs:
           }
 
           if (!(Test-Path $disk)) {
-            throw "Android disk not found."
+            throw "Android VM disk not found."
           }
 
           Write-Host "Starting Android VM..."
@@ -487,15 +522,15 @@ jobs:
 
           if ($vm.HasExited) {
 
-            Write-Host "QEMU exited."
+            Write-Host "QEMU exited immediately."
 
             Write-Host "Exit code: $($vm.ExitCode)"
 
             throw "Android VM failed to start."
           }
 
-          Write-Host "Android VM running."
-          Write-Host "PID: $($vm.Id)"
+          Write-Host "Android VM is running."
+          Write-Host "QEMU PID: $($vm.Id)"
 
           "QEMU_PID=$($vm.Id)" |
             Out-File `
@@ -512,8 +547,12 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "Checking RDP service..."
+
           $service = Get-Service `
             -Name "TermService"
+
+          Write-Host "RDP service: $($service.Status)"
 
           if ($service.Status -ne "Running") {
 
@@ -524,49 +563,58 @@ jobs:
             Start-Sleep -Seconds 5
           }
 
-          $test = Test-NetConnection `
+          Write-Host "Checking local RDP port 3389..."
+
+          $result = Test-NetConnection `
             -ComputerName "127.0.0.1" `
             -Port 3389 `
             -WarningAction SilentlyContinue
 
-          if (!$test.TcpTestSucceeded) {
-            throw "RDP port 3389 is not listening."
+          if (!$result.TcpTestSucceeded) {
+
+            Write-Host "RDP port is not listening."
+
+            Get-Service `
+              -Name "TermService"
+
+            throw "RDP port 3389 is not available."
           }
 
-          Write-Host "RDP is ready."
+          Write-Host "RDP port 3389 is listening."
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
 
 
       # ==========================================
-      # 11. Show Credentials
+      # 11. Show Connection Details
       # ==========================================
       - name: Show Connection Details
         shell: powershell
         run: |
           Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "              RDP CONNECTION"
-          Write-Host "=============================================="
+          Write-Host "=========================================="
+          Write-Host "             RDP CONNECTION"
+          Write-Host "=========================================="
           Write-Host ""
           Write-Host "Address : $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host ""
-          Write-Host "=============================================="
+          Write-Host "=========================================="
           Write-Host "              ANDROID VM"
-          Write-Host "=============================================="
+          Write-Host "=========================================="
           Write-Host ""
           Write-Host "Android-x86"
           Write-Host "RAM : 2048 MB"
           Write-Host "CPU : 2 cores"
           Write-Host "Disk: 16 GB"
           Write-Host ""
-          Write-Host "=============================================="
+          Write-Host "=========================================="
 
 
       # ==========================================
       # 12. Keep Runner Alive
       # ==========================================
-      - name: Keep Everything Alive
+      - name: Keep RDP And Android Alive
         shell: powershell
         run: |
           Write-Host "RDP + Android VM is active."
@@ -593,15 +641,19 @@ jobs:
               $rdp.Status -ne "Running"
             ) {
 
-              Write-Host "RDP service stopped. Restarting..."
+              Write-Host "RDP service stopped. Attempting restart..."
 
               try {
+
                 Restart-Service `
                   -Name "TermService" `
                   -Force
+
               }
               catch {
-                Write-Host "RDP restart failed."
+
+                Write-Host "RDP restart failed:"
+                Write-Host $_.Exception.Message
               }
             }
 
