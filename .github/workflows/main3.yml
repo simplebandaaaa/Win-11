@@ -11,7 +11,7 @@ jobs:
     steps:
 
       # ==============================
-      # 1. Enable Windows RDP
+      # 1. Configure Windows RDP
       # ==============================
       - name: Configure RDP
         shell: powershell
@@ -34,8 +34,10 @@ jobs:
             -Value 0 `
             -Force
 
+          netsh advfirewall firewall delete rule name="GitHub-RDP" 2>$null
+
           netsh advfirewall firewall add rule `
-            name="RDP" `
+            name="GitHub-RDP" `
             dir=in `
             action=allow `
             protocol=TCP `
@@ -50,30 +52,55 @@ jobs:
       - name: Create RDP User
         shell: powershell
         env:
-          RDP_PASSWORD: ${{ secrets.MY_RDP_PASSWORD }}
+          RDP_PASSWORD_SECRET: ${{ secrets.MY_RDP_PASSWORD }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            Write-Error "MY_RDP_PASSWORD GitHub Secret is required."
-            exit 1
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD_SECRET)) {
+
+            Write-Host "MY_RDP_PASSWORD secret not found."
+            Write-Host "Generating a temporary password..."
+
+            $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'
+
+            $password = -join (
+              1..16 | ForEach-Object {
+                $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)]
+              }
+            )
+
+          }
+          else {
+
+            $password = $env:RDP_PASSWORD_SECRET
+
           }
 
           $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD `
+            $password `
             -AsPlainText `
             -Force
 
-          $existing = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+          $existing = Get-LocalUser `
+            -Name "RDP" `
+            -ErrorAction SilentlyContinue
 
-          if (-not $existing) {
-            New-LocalUser `
-              -Name "RDP" `
-              -Password $securePassword `
-              -AccountNeverExpires
-          }
-          else {
+          if ($existing) {
+
+            Write-Host "RDP user already exists."
+
             Set-LocalUser `
               -Name "RDP" `
               -Password $securePassword
+
+          }
+          else {
+
+            New-LocalUser `
+              -Name "RDP" `
+              -Password $securePassword `
+              -AccountNeverExpires `
+              -PasswordNeverExpires
+
           }
 
           Add-LocalGroupMember `
@@ -86,7 +113,7 @@ jobs:
             -Member "RDP" `
             -ErrorAction SilentlyContinue
 
-          "RDP_PASSWORD=$env:RDP_PASSWORD" |
+          "RDP_PASSWORD=$password" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Encoding utf8 `
@@ -99,7 +126,9 @@ jobs:
       - name: Install Tailscale
         shell: powershell
         run: |
+
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
           $installer = "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest `
@@ -111,7 +140,9 @@ jobs:
             -ArgumentList "/i `"$installer`" /quiet /norestart" `
             -Wait
 
-          Remove-Item $installer -Force
+          Remove-Item `
+            $installer `
+            -Force
 
 
       # ==============================
@@ -122,8 +153,11 @@ jobs:
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            Write-Error "TAILSCALE_AUTH_KEY GitHub Secret is required."
+
+            Write-Error "TAILSCALE_AUTH_KEY secret is required."
+
             exit 1
           }
 
@@ -135,11 +169,24 @@ jobs:
 
           Start-Sleep -Seconds 5
 
-          $tsIP = & $ts ip -4 |
-            Select-Object -First 1
+          $tsIP = $null
+
+          for ($i = 0; $i -lt 12; $i++) {
+
+            $tsIP = & $ts ip -4 |
+              Select-Object -First 1
+
+            if (-not [string]::IsNullOrWhiteSpace($tsIP)) {
+              break
+            }
+
+            Start-Sleep -Seconds 5
+          }
 
           if ([string]::IsNullOrWhiteSpace($tsIP)) {
-            Write-Error "Tailscale IPv4 address was not assigned."
+
+            Write-Error "Tailscale IP was not assigned."
+
             exit 1
           }
 
@@ -156,33 +203,42 @@ jobs:
       - name: Install QEMU
         shell: powershell
         run: |
-          choco install qemu -y --no-progress
 
-          $qemu = Get-Command qemu-system-x86_64.exe `
+          choco install qemu `
+            -y `
+            --no-progress
+
+          $qemu = Get-Command `
+            qemu-system-x86_64.exe `
             -ErrorAction SilentlyContinue
 
           if (-not $qemu) {
+
             Write-Error "QEMU installation failed."
+
             exit 1
           }
 
-          Write-Host "QEMU installed:"
+          Write-Host "QEMU:"
           Write-Host $qemu.Source
 
 
       # ==============================
-      # 6. Download Android-x86 ISO
+      # 6. Download Android-x86
       # ==============================
-      - name: Download Android ISO
+      - name: Download Android-x86
         shell: powershell
         run: |
+
+          $androidDir = "$env:GITHUB_WORKSPACE\android"
+
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path "$env:GITHUB_WORKSPACE\android" |
+            -Path $androidDir |
             Out-Null
 
-          $iso = "$env:GITHUB_WORKSPACE\android\android-x86.iso"
+          $iso = "$androidDir\android-x86.iso"
 
           $url = "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download"
 
@@ -193,19 +249,22 @@ jobs:
             -OutFile $iso
 
           if (-not (Test-Path $iso)) {
+
             Write-Error "Android ISO download failed."
+
             exit 1
           }
 
-          Write-Host "Android ISO downloaded."
+          Write-Host "Android ISO downloaded successfully."
 
 
       # ==============================
-      # 7. Create Android VM Disk
+      # 7. Create VM Disk
       # ==============================
       - name: Create Android VM Disk
         shell: powershell
         run: |
+
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
           qemu-img create `
@@ -214,11 +273,13 @@ jobs:
             16G
 
           if (-not (Test-Path $disk)) {
+
             Write-Error "VM disk creation failed."
+
             exit 1
           }
 
-          Write-Host "Android VM disk created."
+          Write-Host "16 GB Android VM disk created."
 
 
       # ==============================
@@ -227,79 +288,24 @@ jobs:
       - name: Start Android VM
         shell: powershell
         run: |
-          $iso  = "$env:GITHUB_WORKSPACE\android\android-x86.iso"
+
+          $iso = "$env:GITHUB_WORKSPACE\android\android-x86.iso"
+
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
-          $qemu = (Get-Command qemu-system-x86_64.exe).Source
+          $qemu = (
+            Get-Command qemu-system-x86_64.exe
+          ).Source
 
           Write-Host "Starting Android VM..."
 
-          Start-Process `
-            -FilePath $qemu `
-            -ArgumentList @(
-              "-m", "2048",
-              "-smp", "2",
-              "-machine", "q35",
-              "-cpu", "max",
-              "-drive", "file=$disk,format=qcow2",
-              "-cdrom", $iso,
-              "-boot", "d",
-              "-vga", "std",
-              "-display", "none",
-              "-serial", "none",
-              "-monitor", "none",
-              "-netdev", "user,id=n1",
-              "-device", "e1000,netdev=n1"
-            ) `
-            -WindowStyle Hidden
-
-          Start-Sleep -Seconds 10
-
-          $process = Get-Process `
-            -Name "qemu-system-x86_64" `
-            -ErrorAction SilentlyContinue
-
-          if (-not $process) {
-            Write-Error "Android VM failed to start."
-            exit 1
-          }
-
-          Write-Host "Android VM is running."
-
-
-      # ==============================
-      # 9. Verify RDP
-      # ==============================
-      - name: Verify RDP
-        shell: powershell
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-
-          $result = Test-NetConnection `
-            -ComputerName $env:TAILSCALE_IP `
-            -Port 3389 `
-            -WarningAction SilentlyContinue
-
-          if (-not $result.TcpTestSucceeded) {
-            Write-Error "RDP port 3389 is not reachable."
-            exit 1
-          }
-
-          Write-Host "RDP is reachable."
-
-
-      # ==============================
-      # 10. Show Connection Details
-      # ==============================
-      - name: Show RDP Details
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "========================================"
-          Write-Host "          RDP + ANDROID VM"
-          Write-Host "========================================"
-          Write-Host "RDP Address : $env:TAILSCALE_IP"
-          Write-Host "Username    : RDP"
-          Write-Host "Password    : [GitHub Secret]"
-          Write-Host ""
-          Write-Host "Android
+          $arguments = @(
+            "-m", "2048",
+            "-smp", "2",
+            "-machine", "q35",
+            "-cpu", "max",
+            "-drive", "file=$disk,format=qcow2",
+            "-cdrom", $iso,
+            "-boot", "d",
+            "-vga", "std",
+            "-display", "none",
