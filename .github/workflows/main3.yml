@@ -18,7 +18,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Configuring RDP..."
+          Write-Host "Configuring Windows RDP..."
 
           Set-ItemProperty `
             -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
@@ -83,8 +83,8 @@ jobs:
               }
             )
 
-          }
-          else {
+          } else {
+
             $password = $env:RDP_PASSWORD_SECRET
           }
 
@@ -105,8 +105,7 @@ jobs:
               -AccountNeverExpires `
               -PasswordNeverExpires
 
-          }
-          else {
+          } else {
 
             Set-LocalUser `
               -Name "RDP" `
@@ -152,7 +151,7 @@ jobs:
             -UseBasicParsing
 
           if (!(Test-Path $installer)) {
-            throw "Tailscale download failed."
+            throw "Tailscale installer download failed."
           }
 
           Write-Host "Installing Tailscale..."
@@ -182,7 +181,7 @@ jobs:
 
 
       # ==========================================
-      # 4. Start Tailscale
+      # 4. Start Tailscale Service
       # ==========================================
       - name: Start Tailscale Service
         shell: powershell
@@ -205,8 +204,7 @@ jobs:
             Start-Sleep -Seconds 5
           }
 
-          Write-Host "Tailscale service:"
-          Get-Service -Name "Tailscale"
+          Write-Host "Tailscale service running."
 
 
       # ==========================================
@@ -236,9 +234,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
 
             Write-Host "===== TAILSCALE STATUS ====="
+
             & $ts status
 
             Write-Host "===== TAILSCALE NETCHECK ====="
+
             & $ts netcheck
 
             throw "Tailscale connection failed."
@@ -259,6 +259,7 @@ jobs:
               if ($value -match '^\d{1,3}(\.\d{1,3}){3}$') {
 
                 $tailscaleIP = $value
+
                 break
               }
             }
@@ -278,7 +279,6 @@ jobs:
             throw "Tailscale IPv4 was not assigned."
           }
 
-          Write-Host ""
           Write-Host "Tailscale IP: $tailscaleIP"
 
           "TAILSCALE_IP=$tailscaleIP" |
@@ -302,8 +302,6 @@ jobs:
             --yes `
             --no-progress
 
-          Write-Host "Refreshing PATH..."
-
           $machinePath = [Environment]::GetEnvironmentVariable(
             "Path",
             "Machine"
@@ -316,7 +314,7 @@ jobs:
 
           $env:Path = "$machinePath;$userPath"
 
-          $possible = @(
+          $possiblePaths = @(
             "C:\Program Files\qemu\qemu-system-x86_64.exe",
             "C:\Program Files\QEMU\qemu-system-x86_64.exe",
             "C:\ProgramData\chocolatey\bin\qemu-system-x86_64.exe",
@@ -325,9 +323,9 @@ jobs:
 
           $qemuPath = $null
 
-          foreach ($path in $possible) {
+          foreach ($path in $possiblePaths) {
 
-            Write-Host "Checking $path"
+            Write-Host "Checking: $path"
 
             if (Test-Path $path) {
 
@@ -338,7 +336,7 @@ jobs:
 
           if (!$qemuPath) {
 
-            Write-Host "Searching Program Files..."
+            Write-Host "Searching for QEMU..."
 
             $found = Get-ChildItem `
               -Path "C:\Program Files" `
@@ -365,14 +363,13 @@ jobs:
             throw "QEMU executable could not be found."
           }
 
-          Write-Host ""
           Write-Host "QEMU FOUND:"
           Write-Host $qemuPath
 
           & $qemuPath --version
 
           if ($LASTEXITCODE -ne 0) {
-            throw "QEMU executable cannot run."
+            throw "QEMU cannot run."
           }
 
           "QEMU_PATH=$qemuPath" |
@@ -383,14 +380,18 @@ jobs:
 
 
       # ==========================================
-      # 7. Download Android ISO from GitHub Release
+      # 7. Download Android ISO
       # ==========================================
       - name: Download Android ISO
         shell: powershell
         env:
-          GH_TOKEN: ${{ github.token }}
+          ANDROID_URL: ${{ secrets.ANDROID_ISO_URL }}
         run: |
           $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:ANDROID_URL)) {
+            throw "ANDROID_ISO_URL GitHub Secret is missing."
+          }
 
           $androidDir = "$env:GITHUB_WORKSPACE\android"
 
@@ -402,43 +403,82 @@ jobs:
 
           $iso = "$androidDir\android.iso"
 
-          $repo = "${{ github.repository }}"
+          Write-Host "Downloading Android ISO..."
 
-          Write-Host "Repository:"
-          Write-Host $repo
-
-          Write-Host ""
-          Write-Host "Downloading android.iso from latest GitHub Release..."
-
-          gh release download `
-            --repo "$repo" `
-            --pattern "android.iso" `
-            --dir "$androidDir" `
-            --clobber
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "GitHub Release download failed."
-          }
+          Invoke-WebRequest `
+            -Uri $env:ANDROID_URL `
+            -OutFile $iso `
+            -UseBasicParsing `
+            -MaximumRedirection 20 `
+            -TimeoutSec 1200
 
           if (!(Test-Path $iso)) {
-            throw "android.iso was not found in the GitHub Release."
+            throw "Android ISO was not downloaded."
           }
 
           $size = (Get-Item $iso).Length
 
-          Write-Host ""
-          Write-Host "Android ISO size:"
-          Write-Host "$size bytes"
+          Write-Host "Downloaded size: $size bytes"
 
           if ($size -lt 500MB) {
-            throw "android.iso is too small and may be invalid."
+
+            Remove-Item `
+              $iso `
+              -Force `
+              -ErrorAction SilentlyContinue
+
+            throw "Downloaded file is too small. The URL returned an HTML/redirect page instead of a real ISO."
           }
 
           Write-Host "Android ISO verified."
 
 
       # ==========================================
-      # 8. Create Android Disk
+      # 8. Find qemu-img
+      # ==========================================
+      - name: Find QEMU Tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $qemuDir = Split-Path `
+            $env:QEMU_PATH `
+            -Parent
+
+          $qemuImg = Join-Path `
+            $qemuDir `
+            "qemu-img.exe"
+
+          if (!(Test-Path $qemuImg)) {
+
+            $found = Get-ChildItem `
+              -Path "C:\Program Files" `
+              -Filter "qemu-img.exe" `
+              -Recurse `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+
+            if ($found) {
+              $qemuImg = $found.FullName
+            }
+          }
+
+          if (!(Test-Path $qemuImg)) {
+            throw "qemu-img.exe was not found."
+          }
+
+          Write-Host "qemu-img found:"
+          Write-Host $qemuImg
+
+          "QEMU_IMG=$qemuImg" |
+            Out-File `
+              -FilePath "$env:GITHUB_ENV" `
+              -Encoding utf8 `
+              -Append
+
+
+      # ==========================================
+      # 9. Create VM Disk
       # ==========================================
       - name: Create Android VM Disk
         shell: powershell
@@ -447,53 +487,27 @@ jobs:
 
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
-          Write-Host "Creating 16 GB Android disk..."
+          Write-Host "Creating 16 GB QCOW2 disk..."
 
-          $qimg = Split-Path `
-            $env:QEMU_PATH `
-            -Parent
-
-          $qemuImg = Join-Path `
-            $qimg `
-            "qemu-img.exe"
-
-          if (!(Test-Path $qemuImg)) {
-
-            $qemuImg = Get-ChildItem `
-              -Path "C:\Program Files" `
-              -Filter "qemu-img.exe" `
-              -Recurse `
-              -ErrorAction SilentlyContinue |
-              Select-Object -First 1 |
-              Select-Object -ExpandProperty FullName
-          }
-
-          if (!$qemuImg) {
-            throw "qemu-img.exe not found."
-          }
-
-          Write-Host "qemu-img:"
-          Write-Host $qemuImg
-
-          & $qemuImg `
+          & $env:QEMU_IMG `
             create `
             -f qcow2 `
             "$disk" `
             16G
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create Android disk."
+            throw "Failed to create VM disk."
           }
 
           if (!(Test-Path $disk)) {
-            throw "Android disk was not created."
+            throw "VM disk was not created."
           }
 
-          Write-Host "Android disk created."
+          Write-Host "VM disk created."
 
 
       # ==========================================
-      # 9. Start Android VM
+      # 10. Start Android VM
       # ==========================================
       - name: Start Android VM
         shell: powershell
@@ -506,12 +520,8 @@ jobs:
 
           $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
 
-          if ([string]::IsNullOrWhiteSpace($qemu)) {
-            throw "QEMU_PATH is empty."
-          }
-
           if (!(Test-Path $qemu)) {
-            throw "QEMU not found: $qemu"
+            throw "QEMU executable not found."
           }
 
           if (!(Test-Path $iso)) {
@@ -550,17 +560,19 @@ jobs:
           Start-Sleep -Seconds 15
 
           if ($vm.HasExited) {
-            throw "QEMU exited immediately. Exit code: $($vm.ExitCode)"
+
+            Write-Host "QEMU exited."
+
+            throw "Android VM failed to start. Exit code: $($vm.ExitCode)"
           }
 
-          Write-Host ""
           Write-Host "Android VM started."
           Write-Host "QEMU PID: $($vm.Id)"
           Write-Host "VNC: 127.0.0.1:5901"
 
 
       # ==========================================
-      # 10. Verify RDP
+      # 11. Verify RDP
       # ==========================================
       - name: Verify RDP
         shell: powershell
@@ -592,36 +604,36 @@ jobs:
 
 
       # ==========================================
-      # 11. Connection Details
+      # 12. Show Connection Information
       # ==========================================
       - name: Show Connection Details
         shell: powershell
         run: |
           Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "                 RDP ACCESS"
-          Write-Host "=============================================="
+          Write-Host "=========================================="
+          Write-Host "              RDP CONNECTION"
+          Write-Host "=========================================="
           Write-Host ""
           Write-Host "Address : $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $env:RDP_PASSWORD"
           Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "                 ANDROID VM"
-          Write-Host "=============================================="
+          Write-Host "=========================================="
+          Write-Host "              ANDROID VM"
+          Write-Host "=========================================="
           Write-Host ""
           Write-Host "RAM : 2048 MB"
           Write-Host "CPU : 2 cores"
           Write-Host "Disk: 16 GB"
           Write-Host "VNC : 127.0.0.1:5901"
           Write-Host ""
-          Write-Host "=============================================="
+          Write-Host "=========================================="
 
 
       # ==========================================
-      # 12. Keep Everything Alive
+      # 13. Keep Alive
       # ==========================================
-      - name: Keep Runner Alive
+      - name: Keep Everything Alive
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
@@ -643,9 +655,12 @@ jobs:
               -Name "TermService" `
               -ErrorAction SilentlyContinue
 
-            if ($null -eq $rdp -or $rdp.Status -ne "Running") {
+            if (
+              $null -eq $rdp -or
+              $rdp.Status -ne "Running"
+            ) {
 
-              Write-Host "RDP stopped. Restarting..."
+              Write-Host "RDP service stopped. Restarting..."
 
               Restart-Service `
                 -Name "TermService" `
