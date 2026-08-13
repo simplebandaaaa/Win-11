@@ -11,7 +11,7 @@ jobs:
     steps:
 
       # ==============================
-      # CREATE RDP USER
+      # 1. CREATE RDP USER
       # ==============================
       - name: Create RDP User
         shell: powershell
@@ -19,39 +19,41 @@ jobs:
           $username = "RDP"
           $password = "RdpRunner#A7x9!Q2m"
 
-          $securePassword = ConvertTo-SecureString `
-            $password `
-            -AsPlainText `
-            -Force
+          Write-Host "Creating RDP account..."
 
-          $existing = Get-LocalUser `
-            -Name $username `
-            -ErrorAction SilentlyContinue
+          # Delete existing account if present
+          net user $username /delete 2>$null
 
-          if ($existing) {
-              Remove-LocalUser `
-                -Name $username `
-                -ErrorAction Stop
+          # Create account
+          net user $username $password /add
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to create RDP account."
+              net accounts
+              exit 1
           }
 
-          New-LocalUser `
-            -Name $username `
-            -Password $securePassword `
-            -AccountNeverExpires `
-            -PasswordNeverExpires `
-            -Description "RDP User" `
-            -ErrorAction Stop
+          # Password never expires
+          net user $username /passwordchg:no
+          net user $username /expires:never
 
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member $username `
-            -ErrorAction Stop
+          # Add Administrator rights
+          net localgroup Administrators $username /add
 
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member $username `
-            -ErrorAction Stop
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to add RDP user to Administrators."
+              exit 1
+          }
 
+          # Add RDP rights
+          net localgroup "Remote Desktop Users" $username /add
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to add RDP user to Remote Desktop Users."
+              exit 1
+          }
+
+          # Save password for later step
           "RDP_PASSWORD=$password" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
@@ -62,29 +64,34 @@ jobs:
 
 
       # ==============================
-      # ENABLE RDP
+      # 2. ENABLE RDP
       # ==============================
       - name: Configure RDP
         shell: powershell
         run: |
+          Write-Host "Configuring Remote Desktop..."
+
           Set-ItemProperty `
             -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
             -Name "fDenyTSConnections" `
             -Value 0 `
             -Force
 
+          # Require Network Level Authentication
           Set-ItemProperty `
             -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" `
             -Value 1 `
             -Force
 
+          # Default RDP security layer
           Set-ItemProperty `
             -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "SecurityLayer" `
             -Value 1 `
             -Force
 
+          # Enable Windows RDP firewall rules
           Enable-NetFirewallRule `
             -DisplayGroup "Remote Desktop"
 
@@ -92,11 +99,11 @@ jobs:
             -Name TermService `
             -Force
 
-          Write-Host "RDP configured."
+          Write-Host "RDP configured successfully."
 
 
       # ==============================
-      # ENABLE HYPER-V
+      # 3. ENABLE HYPER-V
       # ==============================
       - name: Enable Hyper-V
         shell: powershell
@@ -110,7 +117,7 @@ jobs:
             -NoRestart
 
           Write-Host ""
-          Write-Host "Hyper-V status:"
+          Write-Host "Hyper-V feature status:"
 
           Get-WindowsOptionalFeature `
             -Online `
@@ -119,12 +126,22 @@ jobs:
 
 
       # ==============================
-      # CHECK HYPER-V
+      # 4. CHECK HYPER-V
       # ==============================
       - name: Check Hyper-V
         shell: powershell
         run: |
-          Write-Host "Checking Hyper-V commands..."
+          Write-Host "Checking Hyper-V..."
+
+          $hyperv = Get-WindowsOptionalFeature `
+            -Online `
+            -FeatureName Microsoft-Hyper-V-All
+
+          Write-Host "Feature: $($hyperv.FeatureName)"
+          Write-Host "State:   $($hyperv.State)"
+
+          Write-Host ""
+          Write-Host "Hyper-V PowerShell commands:"
 
           $commands = @(
             "Get-VM",
@@ -133,144 +150,22 @@ jobs:
             "New-VMSwitch"
           )
 
-          foreach ($command in $commands) {
-              if (Get-Command $command -ErrorAction SilentlyContinue) {
-                  Write-Host "$command : AVAILABLE"
+          foreach ($cmd in $commands) {
+              if (Get-Command $cmd -ErrorAction SilentlyContinue) {
+                  Write-Host "$cmd : AVAILABLE"
               }
               else {
-                  Write-Host "$command : NOT AVAILABLE"
+                  Write-Host "$cmd : NOT AVAILABLE"
               }
           }
 
 
       # ==============================
-      # INSTALL TAILSCALE
+      # 5. INSTALL TAILSCALE
       # ==============================
       - name: Install Tailscale
         shell: powershell
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
+          Write-Host "Installing Tailscale..."
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $installer
-
-          Start-Process `
-            msiexec.exe `
-            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
-            -Wait
-
-          Remove-Item `
-            $installer `
-            -Force
-
-          Write-Host "Tailscale installed."
-
-
-      # ==============================
-      # CONNECT TAILSCALE
-      # ==============================
-      - name: Connect Tailscale
-        shell: powershell
-        env:
-          TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTH_KEY)) {
-              Write-Error "TAILSCALE_AUTH_KEY secret is missing."
-              exit 1
-          }
-
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          & $tailscale up `
-            --authkey="$env:TS_AUTH_KEY" `
-            --hostname="gh-rdp-$env:GITHUB_RUN_ID"
-
-          $ip = $null
-
-          for ($i = 1; $i -le 12; $i++) {
-
-              $ip = (& $tailscale ip -4 2>$null |
-                Select-Object -First 1).Trim()
-
-              if ($ip) {
-                  break
-              }
-
-              Write-Host "Waiting for Tailscale IP..."
-              Start-Sleep -Seconds 5
-          }
-
-          if ([string]::IsNullOrWhiteSpace($ip)) {
-              Write-Error "Tailscale IP was not assigned."
-              exit 1
-          }
-
-          "TAILSCALE_IP=$ip" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
-
-          Write-Host "Tailscale connected."
-
-
-      # ==============================
-      # TEST RDP
-      # ==============================
-      - name: Test RDP
-        shell: powershell
-        run: |
-          Write-Host "Testing RDP port 3389..."
-
-          $result = Test-NetConnection `
-            -ComputerName $env:TAILSCALE_IP `
-            -Port 3389 `
-            -WarningAction SilentlyContinue
-
-          if (-not $result.TcpTestSucceeded) {
-              Write-Error "RDP port 3389 is not reachable."
-              exit 1
-          }
-
-          Write-Host "RDP port is reachable."
-
-
-      # ==============================
-      # SHOW RDP INFORMATION
-      # ==============================
-      - name: Show RDP Information
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "              RDP READY"
-          Write-Host "=========================================="
-          Write-Host "Address  : $env:TAILSCALE_IP"
-          Write-Host "Port     : 3389"
-          Write-Host "Username : RDP"
-          Write-Host "Password : $env:RDP_PASSWORD"
-          Write-Host "=========================================="
-          Write-Host ""
-
-          Write-Host "Hyper-V status:"
-
-          Get-WindowsOptionalFeature `
-            -Online `
-            -FeatureName Microsoft-Hyper-V-All |
-            Select-Object FeatureName, State
-
-
-      # ==============================
-      # KEEP RUNNER ALIVE
-      # ==============================
-      - name: Keep RDP Alive
-        shell: powershell
-        run: |
-          Write-Host "RDP is active."
-
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active"
-              Start-Sleep -Seconds 300
-          }
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-
