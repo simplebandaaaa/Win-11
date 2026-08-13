@@ -10,27 +10,31 @@ jobs:
 
     steps:
 
-      # ==============================
-      # 1. Configure Windows RDP
-      # ==============================
-      - name: Configure RDP
+      # ==========================================
+      # 1. Enable RDP
+      # ==========================================
+      - name: Configure Windows RDP
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Configuring Windows RDP..."
+
           Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
             -Value 0 `
             -Force
 
           Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
             -Value 0 `
             -Force
 
           Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'SecurityLayer' `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "SecurityLayer" `
             -Value 0 `
             -Force
 
@@ -45,31 +49,33 @@ jobs:
 
           Restart-Service TermService -Force
 
+          Write-Host "RDP configured successfully."
 
-      # ==============================
+
+      # ==========================================
       # 2. Create RDP User
-      # ==============================
+      # ==========================================
       - name: Create RDP User
         shell: powershell
         env:
           RDP_PASSWORD_SECRET: ${{ secrets.MY_RDP_PASSWORD }}
         run: |
+          $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD_SECRET)) {
 
-            Write-Host "MY_RDP_PASSWORD secret not found."
-            Write-Host "Generating a temporary password..."
+            Write-Host "MY_RDP_PASSWORD is not configured."
+            Write-Host "Generating temporary RDP password..."
 
-            $chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%'
+            $chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%"
 
             $password = -join (
-              1..16 | ForEach-Object {
+              1..18 | ForEach-Object {
                 $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)]
               }
             )
 
-          }
-          else {
+          } else {
 
             $password = $env:RDP_PASSWORD_SECRET
 
@@ -80,20 +86,13 @@ jobs:
             -AsPlainText `
             -Force
 
-          $existing = Get-LocalUser `
+          $user = Get-LocalUser `
             -Name "RDP" `
             -ErrorAction SilentlyContinue
 
-          if ($existing) {
+          if ($null -eq $user) {
 
-            Write-Host "RDP user already exists."
-
-            Set-LocalUser `
-              -Name "RDP" `
-              -Password $securePassword
-
-          }
-          else {
+            Write-Host "Creating RDP user..."
 
             New-LocalUser `
               -Name "RDP" `
@@ -101,6 +100,13 @@ jobs:
               -AccountNeverExpires `
               -PasswordNeverExpires
 
+          } else {
+
+            Write-Host "RDP user already exists."
+
+            Set-LocalUser `
+              -Name "RDP" `
+              -Password $securePassword
           }
 
           Add-LocalGroupMember `
@@ -119,193 +125,81 @@ jobs:
               -Encoding utf8 `
               -Append
 
+          Write-Host "RDP user configured."
 
-      # ==============================
+
+      # ==========================================
       # 3. Install Tailscale
-      # ==============================
+      # ==========================================
       - name: Install Tailscale
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
 
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
 
           $installer = "$env:TEMP\tailscale.msi"
 
+          Write-Host "Downloading Tailscale..."
+
           Invoke-WebRequest `
             -Uri $url `
-            -OutFile $installer
+            -OutFile $installer `
+            -UseBasicParsing
 
-          Start-Process `
+          if (!(Test-Path $installer)) {
+            throw "Tailscale installer was not downloaded."
+          }
+
+          Write-Host "Installing Tailscale..."
+
+          $process = Start-Process `
             msiexec.exe `
             -ArgumentList "/i `"$installer`" /quiet /norestart" `
-            -Wait
+            -Wait `
+            -PassThru
 
-          Remove-Item `
-            $installer `
-            -Force
+          if ($process.ExitCode -ne 0) {
+            throw "Tailscale installation failed. Exit code: $($process.ExitCode)"
+          }
+
+          Remove-Item $installer -Force
+
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (!(Test-Path $ts)) {
+            throw "tailscale.exe was not found after installation."
+          }
+
+          Write-Host "Tailscale installed successfully."
 
 
-      # ==============================
+      # ==========================================
       # 4. Connect Tailscale
-      # ==============================
+      # ==========================================
       - name: Connect Tailscale
         shell: powershell
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-
-            Write-Error "TAILSCALE_AUTH_KEY secret is required."
-
-            exit 1
+            throw "TAILSCALE_AUTH_KEY GitHub Secret is missing."
           }
 
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
+          Write-Host "Connecting to Tailscale..."
+
           & $ts up `
-            --authkey=$env:TS_AUTHKEY `
+            --authkey="$env:TS_AUTHKEY" `
             --hostname="gh-android-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tailscale connection failed. Exit code: $LASTEXITCODE"
+          }
 
           Start-Sleep -Seconds 5
 
-          $tsIP = $null
-
-          for ($i = 0; $i -lt 12; $i++) {
-
-            $tsIP = & $ts ip -4 |
-              Select-Object -First 1
-
-            if (-not [string]::IsNullOrWhiteSpace($tsIP)) {
-              break
-            }
-
-            Start-Sleep -Seconds 5
-          }
-
-          if ([string]::IsNullOrWhiteSpace($tsIP)) {
-
-            Write-Error "Tailscale IP was not assigned."
-
-            exit 1
-          }
-
-          "TAILSCALE_IP=$tsIP" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
-
-
-      # ==============================
-      # 5. Install QEMU
-      # ==============================
-      - name: Install QEMU
-        shell: powershell
-        run: |
-
-          choco install qemu `
-            -y `
-            --no-progress
-
-          $qemu = Get-Command `
-            qemu-system-x86_64.exe `
-            -ErrorAction SilentlyContinue
-
-          if (-not $qemu) {
-
-            Write-Error "QEMU installation failed."
-
-            exit 1
-          }
-
-          Write-Host "QEMU:"
-          Write-Host $qemu.Source
-
-
-      # ==============================
-      # 6. Download Android-x86
-      # ==============================
-      - name: Download Android-x86
-        shell: powershell
-        run: |
-
-          $androidDir = "$env:GITHUB_WORKSPACE\android"
-
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $androidDir |
-            Out-Null
-
-          $iso = "$androidDir\android-x86.iso"
-
-          $url = "https://sourceforge.net/projects/android-x86/files/Release%209.0/android-x86_64-9.0-r2.iso/download"
-
-          Write-Host "Downloading Android-x86..."
-
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $iso
-
-          if (-not (Test-Path $iso)) {
-
-            Write-Error "Android ISO download failed."
-
-            exit 1
-          }
-
-          Write-Host "Android ISO downloaded successfully."
-
-
-      # ==============================
-      # 7. Create VM Disk
-      # ==============================
-      - name: Create Android VM Disk
-        shell: powershell
-        run: |
-
-          $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
-
-          qemu-img create `
-            -f qcow2 `
-            $disk `
-            16G
-
-          if (-not (Test-Path $disk)) {
-
-            Write-Error "VM disk creation failed."
-
-            exit 1
-          }
-
-          Write-Host "16 GB Android VM disk created."
-
-
-      # ==============================
-      # 8. Start Android VM
-      # ==============================
-      - name: Start Android VM
-        shell: powershell
-        run: |
-
-          $iso = "$env:GITHUB_WORKSPACE\android\android-x86.iso"
-
-          $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
-
-          $qemu = (
-            Get-Command qemu-system-x86_64.exe
-          ).Source
-
-          Write-Host "Starting Android VM..."
-
-          $arguments = @(
-            "-m", "2048",
-            "-smp", "2",
-            "-machine", "q35",
-            "-cpu", "max",
-            "-drive", "file=$disk,format=qcow2",
-            "-cdrom", $iso,
-            "-boot", "d",
-            "-vga", "std",
-            "-display", "none",
+          $tsIP =
