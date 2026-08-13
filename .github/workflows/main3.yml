@@ -1,4 +1,4 @@
-name: RDP
+name: RDP AVM
 
 on:
   workflow_dispatch:
