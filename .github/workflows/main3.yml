@@ -6,18 +6,19 @@ on:
 jobs:
   secure-linux-rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # Standard GitHub Runner max execution limit
+    timeout-minutes: 360 # GitHub runner max execution limit (6 hours)
 
     steps:
       - name: Install Desktop Environment & XRDP
         run: |
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11
+          sudo apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 netcat-openbsd
           
           # Set XFCE as the default desktop for XRDP
           echo "xfce4-session" > ~/.xsession
-          sudo systemctl enable xrdp
-          sudo service xrdp start
+          
+          # Configure XRDP permissions
+          sudo adduser xrdp ssl-cert
 
       - name: Create RDP User
         run: |
@@ -53,9 +54,19 @@ jobs:
 
           echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
 
-      - name: Verify RDP Port Status
+      - name: Start & Verify RDP Port Status
         run: |
-          sudo service xrdp restart
+          # Stop any background service conflicts
+          sudo service xrdp stop || true
+          
+          # Manually start both session manager and main RDP daemon
+          sudo xrdp-sesman
+          sudo xrdp
+          
+          # Wait 3 seconds for port binding
+          sleep 3
+          
+          # Test local port connectivity
           nc -zv 127.0.0.1 3389 || exit 1
 
       - name: Maintain Connection
