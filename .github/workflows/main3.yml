@@ -1,4 +1,4 @@
-name: Ubuntu 24.04 XFCE RDP
+name: Ubuntu XFCE RDP
 
 on:
   workflow_dispatch:
@@ -9,86 +9,80 @@ jobs:
     timeout-minutes: 350
 
     steps:
-
-      - name: Install XFCE and XRDP
+      - name: Install XFCE XRDP
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            xfce4 \
-            xrdp \
-            dbus-x11
+            xfce4 xfce4-goodies xrdp dbus-x11
 
       - name: Create RDP user
         run: |
           sudo useradd -m -s /bin/bash rdpuser
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
+          sudo usermod -aG sudo rdpuser
 
-      - name: Configure XFCE
+      - name: Configure XFCE XRDP
         run: |
-          echo 'startxfce4' | sudo tee /home/rdpuser/.xsession >/dev/null
-          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-
-          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+          sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
           #!/bin/sh
+          export LANG=C.UTF-8
+          export LANGUAGE=C.UTF-8
+          export LC_ALL=C.UTF-8
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg:/etc/xdg
           export XDG_CURRENT_DESKTOP=XFCE
           export XDG_SESSION_DESKTOP=xfce
           export DESKTOP_SESSION=xfce
-          exec startxfce4
-          EOF
+
+          if [ -r /etc/profile ]; then
+              . /etc/profile
+          fi
+
+          exec dbus-run-session -- startxfce4
+          EOF'
 
           sudo chmod +x /etc/xrdp/startwm.sh
 
-      - name: Start XRDP
+          sudo -u rdpuser bash -c 'cat > ~/.xsession <<EOF
+          exec dbus-run-session -- startxfce4
+          EOF'
+
+      - name: Restart XRDP
         run: |
-          sudo systemctl enable --now xrdp
-          sleep 2
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3
           sudo systemctl --no-pager status xrdp
           sudo ss -lntp | grep ':3389'
 
-      - name: Check Tailscale Secret
+      - name: Check Tailscale secret
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          if [ -z "$TS_KEY" ]; then
-            echo "ERROR: TAILSCALE_AUTHKEY is missing!"
-            echo "Go to GitHub Settings > Secrets and variables > Actions"
+          test -n "$TS_KEY" || {
+            echo "TAILSCALE_AUTHKEY missing"
             exit 1
-          fi
-
-          echo "TAILSCALE_AUTHKEY found."
+          }
+          echo "Tailscale secret found"
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Get Tailscale IP
+      - name: Show connection details
         run: |
-          sleep 3
-
-          echo ""
-          echo "======================================"
-          echo "       TAILSCALE / RDP DETAILS"
-          echo "======================================"
-          echo ""
-          echo "Tailscale IPv4:"
+          sleep 5
+          echo "=============================="
+          echo "TAILSCALE IP:"
           sudo tailscale ip -4
-          echo ""
-          echo "RDP Username: rdpuser"
-          echo "RDP Password: Ubuntu@12345"
-          echo "RDP Port: 3389"
-          echo ""
-          echo "======================================"
+          echo "=============================="
+          echo "RDP USER: rdpuser"
+          echo "RDP PASSWORD: Ubuntu@12345"
+          echo "RDP PORT: 3389"
+          echo "=============================="
 
-      - name: Verify RDP
+      - name: Keep alive
         run: |
-          echo "Checking XRDP..."
-          sudo ss -lntp | grep ':3389' || exit 1
-          echo "XRDP is listening on port 3389."
-
-      - name: Keep runner alive
-        run: |
-          echo "RDP server is running..."
           while true; do
             sleep 60
           done
