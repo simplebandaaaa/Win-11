@@ -1,4 +1,4 @@
-name: Ubuntu XFCE RDP
+name: Ubuntu 24.04 XFCE RDP
 
 on:
   workflow_dispatch:
@@ -13,55 +13,61 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            xfce4 xfce4-goodies xrdp dbus-x11
+            xfce4 \
+            xfce4-goodies \
+            xfce4-session \
+            xrdp \
+            dbus-x11
 
       - name: Create RDP user
         run: |
-          sudo useradd -m -s /bin/bash rdpuser
+          sudo useradd -m -s /bin/bash rdpuser || true
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
           sudo usermod -aG sudo rdpuser
 
-      - name: Configure XFCE XRDP
+      - name: Configure XFCE session
         run: |
+          sudo -u rdpuser bash -c 'printf "%s\n" "xfce4-session" > /home/rdpuser/.xsession'
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+          sudo chmod 644 /home/rdpuser/.xsession
+
           sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
           #!/bin/sh
-          export LANG=C.UTF-8
-          export LANGUAGE=C.UTF-8
-          export LC_ALL=C.UTF-8
-          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg:/etc/xdg
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_SESSION_DESKTOP=xfce
-          export DESKTOP_SESSION=xfce
+
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
 
           if [ -r /etc/profile ]; then
               . /etc/profile
           fi
 
-          exec dbus-run-session -- startxfce4
+          if [ -r /etc/default/locale ]; then
+              . /etc/default/locale
+              export LANG LANGUAGE
+          fi
+
+          exec /etc/X11/Xsession
           EOF'
 
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          sudo -u rdpuser bash -c 'cat > ~/.xsession <<EOF
-          exec dbus-run-session -- startxfce4
-          EOF'
-
-      - name: Restart XRDP
+      - name: Enable and restart XRDP
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
           sleep 3
-          sudo systemctl --no-pager status xrdp
+          sudo systemctl is-active --quiet xrdp
+          echo "XRDP is running"
           sudo ss -lntp | grep ':3389'
 
       - name: Check Tailscale secret
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          test -n "$TS_KEY" || {
-            echo "TAILSCALE_AUTHKEY missing"
+          if [ -z "$TS_KEY" ]; then
+            echo "ERROR: TAILSCALE_AUTHKEY is missing"
             exit 1
-          }
+          fi
           echo "Tailscale secret found"
 
       - name: Connect Tailscale
@@ -71,17 +77,17 @@ jobs:
 
       - name: Show connection details
         run: |
-          sleep 5
-          echo "=============================="
+          sleep 3
+          echo "================================"
           echo "TAILSCALE IP:"
           sudo tailscale ip -4
-          echo "=============================="
+          echo "================================"
           echo "RDP USER: rdpuser"
           echo "RDP PASSWORD: Ubuntu@12345"
           echo "RDP PORT: 3389"
-          echo "=============================="
+          echo "================================"
 
-      - name: Keep alive
+      - name: Keep runner alive
         run: |
           while true; do
             sleep 60
