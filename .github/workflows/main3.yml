@@ -1,4 +1,4 @@
-name: Ubuntu 24.04 XFCE RDP
+name: Ubuntu 24.04 LXQt RDP
 
 on:
   workflow_dispatch:
@@ -9,112 +9,66 @@ jobs:
     timeout-minutes: 350
 
     steps:
-
-      - name: Install desktop
+      - name: Install LXQt and XRDP
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-session \
-            xfconf \
+            lxqt \
+            lxqt-session \
             xrdp \
             dbus-x11
 
       - name: Create RDP user
         run: |
-          sudo useradd -m -s /bin/bash rdpuser || true
+          sudo useradd -m -s /bin/bash rdpuser
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
-          sudo usermod -aG sudo rdpuser
 
-      - name: Fix XFCE environment
+      - name: Configure LXQt
         run: |
-          sudo mkdir -p /etc/xdg/xdg-xfce
-
-          sudo bash -c 'cat > /home/rdpuser/.xsession <<EOF
-          #!/bin/sh
-          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg:/etc"
-          export XDG_CONFIG_HOME="/home/rdpuser/.config"
-          export XDG_CURRENT_DESKTOP="XFCE"
-          export XDG_SESSION_DESKTOP="xfce"
-          export DESKTOP_SESSION="xfce"
-          export LANG="C.UTF-8"
-          export LC_ALL="C.UTF-8"
-
-          exec dbus-run-session -- xfce4-session
-          EOF'
+          sudo -u rdpuser bash -c 'printf "%s\n" "startlxqt" > /home/rdpuser/.xsession'
 
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-          sudo chmod +x /home/rdpuser/.xsession
+          sudo chmod 755 /home/rdpuser/.xsession
 
-          sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
+          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
           #!/bin/sh
-
-          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg:/etc"
-          export XDG_CONFIG_HOME="/home/rdpuser/.config"
-          export XDG_CURRENT_DESKTOP="XFCE"
-          export XDG_SESSION_DESKTOP="xfce"
-          export DESKTOP_SESSION="xfce"
-          export LANG="C.UTF-8"
-          export LC_ALL="C.UTF-8"
 
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
 
-          exec /home/rdpuser/.xsession
-          EOF'
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-LXQt:/etc/xdg:/etc
+          export XDG_CURRENT_DESKTOP=LXQt
+          export XDG_SESSION_DESKTOP=LXQt
+          export DESKTOP_SESSION=LXQt
 
-          sudo chmod +x /etc/xrdp/startwm.sh
+          exec dbus-run-session -- startlxqt
+          EOF
 
-      - name: Prepare user config
-        run: |
-          sudo -u rdpuser mkdir -p /home/rdpuser/.config/xfce4
-          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
+          sudo chmod 755 /etc/xrdp/startwm.sh
 
-      - name: Restart XRDP
+      - name: Start XRDP
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
           sleep 3
-
-          echo "XRDP STATUS:"
-          sudo systemctl --no-pager status xrdp
-
-          echo "XRDP PORT:"
           sudo ss -lntp | grep ':3389'
-
-      - name: Check Tailscale secret
-        env:
-          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-        run: |
-          if [ -z "$TS_KEY" ]; then
-            echo "TAILSCALE_AUTHKEY is missing"
-            exit 1
-          fi
-          echo "Tailscale secret found"
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Show RDP information
+      - name: Show connection details
         run: |
           sleep 3
-
-          echo "===================================="
-          echo "TAILSCALE IP"
-          echo "===================================="
+          echo "================================"
+          echo "TAILSCALE IP:"
           sudo tailscale ip -4
-
-          echo ""
-          echo "===================================="
-          echo "RDP LOGIN"
-          echo "===================================="
-          echo "Username: rdpuser"
-          echo "Password: Ubuntu@12345"
-          echo "Port: 3389"
-          echo "===================================="
+          echo "================================"
+          echo "RDP USER: rdpuser"
+          echo "RDP PASSWORD: Ubuntu@12345"
+          echo "RDP PORT: 3389"
+          echo "================================"
 
       - name: Keep alive
         run: |
