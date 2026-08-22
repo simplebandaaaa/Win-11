@@ -1,4 +1,4 @@
-name: Fast Ubuntu XFCE RDP
+name: Ubuntu 24.04 XFCE RDP
 
 on:
   workflow_dispatch:
@@ -9,7 +9,8 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Install XFCE + XRDP
+
+      - name: Install XFCE and XRDP
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -40,25 +41,54 @@ jobs:
       - name: Start XRDP
         run: |
           sudo systemctl enable --now xrdp
+          sleep 2
+          sudo systemctl --no-pager status xrdp
           sudo ss -lntp | grep ':3389'
+
+      - name: Check Tailscale Secret
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if [ -z "$TS_KEY" ]; then
+            echo "ERROR: TAILSCALE_AUTHKEY is missing!"
+            echo "Go to GitHub Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+
+          echo "TAILSCALE_AUTHKEY found."
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Show RDP information
+      - name: Get Tailscale IP
         run: |
           sleep 3
-          echo "=============================="
-          echo "TAILSCALE IP:"
-          sudo tailscale ip -4
-          echo "=============================="
-          echo "USERNAME: rdpuser"
-          echo "PASSWORD: Ubuntu@12345"
-          echo "PORT: 3389"
-          echo "=============================="
 
-      - name: Keep alive
+          echo ""
+          echo "======================================"
+          echo "       TAILSCALE / RDP DETAILS"
+          echo "======================================"
+          echo ""
+          echo "Tailscale IPv4:"
+          sudo tailscale ip -4
+          echo ""
+          echo "RDP Username: rdpuser"
+          echo "RDP Password: Ubuntu@12345"
+          echo "RDP Port: 3389"
+          echo ""
+          echo "======================================"
+
+      - name: Verify RDP
         run: |
-          while true; do sleep 60; done
+          echo "Checking XRDP..."
+          sudo ss -lntp | grep ':3389' || exit 1
+          echo "XRDP is listening on port 3389."
+
+      - name: Keep runner alive
+        run: |
+          echo "RDP server is running..."
+          while true; do
+            sleep 60
+          done
