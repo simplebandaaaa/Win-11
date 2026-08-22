@@ -6,21 +6,18 @@ on:
 jobs:
   secure-linux-rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 360 # GitHub runner max execution limit (6 hours)
+    timeout-minutes: 360
 
     steps:
       - name: Install Desktop Environment & XRDP
         run: |
           sudo apt-get update
           sudo apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 netcat-openbsd
-          
-          # Set XFCE as the default desktop for XRDP
-          echo "xfce4-session" > ~/.xsession
-          
-          # Configure XRDP permissions
+
+          # XRDP ke SSL permissions fix karein
           sudo adduser xrdp ssl-cert
 
-      - name: Create RDP User
+      - name: Create RDP User & Configure Session
         run: |
           USERNAME="rdpuser"
           PASSWORD="${{ secrets.MY_RDP_PASSWORD }}"
@@ -29,13 +26,16 @@ jobs:
             PASSWORD="SecurePass@2026!"
           fi
 
-          # Hide password from GitHub workflow logs
           echo "::add-mask::$PASSWORD"
 
-          # Create user and set password
+          # User create karein
           sudo useradd -m -s /bin/bash $USERNAME
           echo "$USERNAME:$PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo $USERNAME
+
+          # XFCE Session to rdpuser home directory (MAIN FIX FOR FAILSAFE ERROR)
+          echo "startxfce4" | sudo tee /home/$USERNAME/.xsession
+          sudo chown $USERNAME:$USERNAME /home/$USERNAME/.xsession
 
           echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
           echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
@@ -45,7 +45,6 @@ jobs:
           curl -fsSL https://tailscale.com/install.sh | sh
           sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-linux-runner-$GITHUB_RUN_ID
 
-          # Get Tailscale IPv4 address
           TS_IP=$(tailscale ip -4)
           if [ -z "$TS_IP" ]; then
             echo "Failed to get Tailscale IP"
@@ -56,17 +55,13 @@ jobs:
 
       - name: Start & Verify RDP Port Status
         run: |
-          # Stop any background service conflicts
           sudo service xrdp stop || true
           
-          # Manually start both session manager and main RDP daemon
+          # Manually daemons start karein
           sudo xrdp-sesman
           sudo xrdp
           
-          # Wait 3 seconds for port binding
           sleep 3
-          
-          # Test local port connectivity
           nc -zv 127.0.0.1 3389 || exit 1
 
       - name: Maintain Connection
