@@ -1,532 +1,134 @@
-name: Windows RDP + Android VM
+name: Ubuntu 24.04 XFCE RDP
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  android-rdp:
-
-    runs-on: windows-latest
+  ubuntu-rdp:
+    runs-on: ubuntu-24.04
     timeout-minutes: 3600
 
     steps:
-
-      # ==============================
-      # RDP
-      # ==============================
-
-      - name: Configure RDP
-        shell: powershell
+      - name: Update Ubuntu
         run: |
-          $ErrorActionPreference = "Stop"
+          sudo apt-get update
+          sudo apt-get upgrade -y
 
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" `
-            -Value 0 `
-            -Force
-
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" `
-            -Value 0 `
-            -Force
-
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "SecurityLayer" `
-            -Value 0 `
-            -Force
-
-          netsh advfirewall firewall add rule `
-            name="GitHub-RDP" `
-            dir=in `
-            action=allow `
-            protocol=TCP `
-            localport=3389
-
-          Set-Service `
-            -Name "TermService" `
-            -StartupType Automatic
-
-          Restart-Service `
-            -Name "TermService" `
-            -Force
-
-          Write-Host "RDP configured."
-
-      # ==============================
-      # RDP USER
-      # ==============================
+      - name: Install XFCE and XRDP
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            dbus-x11 \
+            xorgxrdp
 
       - name: Create RDP User
-        shell: powershell
         env:
-          RDP_PASSWORD_SECRET: ${{ secrets.MY_RDP_PASSWORD }}
+          RDP_PASSWORD: ${{ secrets.MY_RDP_PASSWORD }}
         run: |
-          $ErrorActionPreference = "Stop"
+          PASSWORD="${RDP_PASSWORD:-SecurePass@2026!}"
 
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD_SECRET)) {
+          if ! id rdpuser >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash rdpuser
+          fi
 
-            $chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%"
+          echo "rdpuser:$PASSWORD" | sudo chpasswd
 
-            $password = -join (
-              1..18 | ForEach-Object {
-                $chars[
-                  (Get-Random -Minimum 0 -Maximum $chars.Length)
-                ]
-              }
-            )
+          sudo usermod -aG sudo rdpuser
 
-          } else {
+          echo "startxfce4" | sudo tee /home/rdpuser/.xsession
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+          sudo chmod 644 /home/rdpuser/.xsession
 
-            $password = $env:RDP_PASSWORD_SECRET
+      - name: Configure XRDP
+        run: |
+          sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini
 
-          }
+          sudo adduser xrdp ssl-cert || true
 
-          $secure = ConvertTo-SecureString `
-            $password `
-            -AsPlainText `
-            -Force
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
 
-          $existing = Get-LocalUser `
-            -Name "RDP" `
-            -ErrorAction SilentlyContinue
-
-          if ($null -eq $existing) {
-
-            New-LocalUser `
-              -Name "RDP" `
-              -Password $secure `
-              -AccountNeverExpires `
-              -PasswordNeverExpires
-
-          } else {
-
-            Set-LocalUser `
-              -Name "RDP" `
-              -Password $secure
-
-          }
-
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member "RDP" `
-            -ErrorAction SilentlyContinue
-
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member "RDP" `
-            -ErrorAction SilentlyContinue
-
-          "RDP_PASSWORD=$password" |
-            Out-File `
-              "$env:GITHUB_ENV" `
-              -Encoding utf8 `
-              -Append
-
-          Write-Host "RDP username: RDP"
-
-      # ==============================
-      # TAILSCALE
-      # ==============================
+          sleep 5
+          sudo systemctl --no-pager status xrdp || true
 
       - name: Install Tailscale
-        shell: powershell
         run: |
-          $ErrorActionPreference = "Stop"
-
-          $installer = "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest `
-            -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" `
-            -OutFile $installer `
-            -UseBasicParsing `
-            -TimeoutSec 300
-
-          $p = Start-Process `
-            -FilePath "msiexec.exe" `
-            -ArgumentList "/i `"$installer`" /quiet /norestart" `
-            -Wait `
-            -PassThru
-
-          if ($p.ExitCode -ne 0) {
-            throw "Tailscale installation failed."
-          }
-
-          Remove-Item `
-            $installer `
-            -Force `
-            -ErrorAction SilentlyContinue
-
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (!(Test-Path $ts)) {
-            throw "tailscale.exe was not found."
-          }
-
-          Write-Host "Tailscale installed."
+          curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Connect Tailscale
-        shell: powershell
         env:
           TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $ErrorActionPreference = "Stop"
+          if [ -z "$TS_AUTHKEY" ]; then
+            echo "TAILSCALE_AUTH_KEY secret is missing"
+            exit 1
+          fi
 
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "TAILSCALE_AUTH_KEY secret is missing."
-          }
+          sudo tailscale up \
+            --authkey="$TS_AUTHKEY" \
+            --hostname="gh-ubuntu-${GITHUB_RUN_ID}"
 
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          sleep 5
 
-          & $ts up `
-            --authkey="$env:TS_AUTHKEY" `
-            --hostname="android-$env:GITHUB_RUN_ID" `
-            --accept-dns=false
+          TS_IP=$(sudo tailscale ip -4 | head -n 1)
 
-          if ($LASTEXITCODE -ne 0) {
-            & $ts status
-            throw "Tailscale connection failed."
-          }
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP was not assigned"
+            exit 1
+          fi
 
-          $ip = $null
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-          for ($i = 1; $i -le 20; $i++) {
-
-            $lines = & $ts ip -4 2>$null
-
-            foreach ($line in $lines) {
-
-              $candidate = $line.ToString().Trim()
-
-              if ($candidate -match '^\d{1,3}(\.\d{1,3}){3}$') {
-                $ip = $candidate
-                break
-              }
-
-            }
-
-            if ($ip) {
-              break
-            }
-
-            Start-Sleep -Seconds 3
-          }
-
-          if (!$ip) {
-            throw "Tailscale IPv4 was not assigned."
-          }
-
-          "TAILSCALE_IP=$ip" |
-            Out-File `
-              "$env:GITHUB_ENV" `
-              -Encoding utf8 `
-              -Append
-
-          Write-Host "Tailscale IP: $ip"
-
-      # ==============================
-      # QEMU
-      # ==============================
-
-      - name: Install QEMU
-        shell: powershell
+      - name: Verify XRDP
         run: |
-          $ErrorActionPreference = "Stop"
+          echo "Tailscale IP: $TAILSCALE_IP"
 
-          choco install qemu `
-            --yes `
-            --no-progress
-
-          $qemu = Get-ChildItem `
-            -Path "C:\Program Files" `
-            -Filter "qemu-system-x86_64.exe" `
-            -Recurse `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-
-          if (!$qemu) {
-            throw "QEMU executable was not found."
+          sudo ss -lntp | grep ':3389' || {
+            echo "XRDP is not listening on port 3389"
+            sudo systemctl status xrdp --no-pager
+            exit 1
           }
 
-          $qimg = Get-ChildItem `
-            -Path "C:\Program Files" `
-            -Filter "qemu-img.exe" `
-            -Recurse `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          echo "XRDP is listening on port 3389"
 
-          if (!$qimg) {
-            throw "qemu-img.exe was not found."
-          }
-
-          "QEMU_PATH=$($qemu.FullName)" |
-            Out-File `
-              "$env:GITHUB_ENV" `
-              -Encoding utf8 `
-              -Append
-
-          "QEMU_IMG=$($qimg.FullName)" |
-            Out-File `
-              "$env:GITHUB_ENV" `
-              -Encoding utf8 `
-              -Append
-
-          & $qemu.FullName --version
-
-      # ==============================
-      # ANDROID ISO
-      # ==============================
-
-      - name: Download Android ISO
-        shell: powershell
-        env:
-          ANDROID_ISO_URL: ${{ secrets.ANDROID_ISO_URL }}
+      - name: Test RDP Port
         run: |
-          $ErrorActionPreference = "Stop"
+          for i in {1..10}; do
+            if timeout 3 bash -c \
+              "</dev/tcp/$TAILSCALE_IP/3389" 2>/dev/null; then
+              echo "RDP port is reachable"
+              exit 0
+            fi
 
-          if ([string]::IsNullOrWhiteSpace($env:ANDROID_ISO_URL)) {
-            throw @"
-ANDROID_ISO_URL is missing.
+            echo "Waiting for RDP..."
+            sleep 5
+          done
 
-It must be a DIRECT download URL to:
-android-x86_64-9.0-r2.iso
+          echo "RDP port 3389 test failed"
+          exit 1
 
-Do NOT use:
-https://sourceforge.net/.../download
-
-The official Android-x86 release lists Fosshub and OSDN as mirrors.
-"@
-          }
-
-          $dir = "$env:GITHUB_WORKSPACE\android"
-
-          New-Item `
-            -ItemType Directory `
-            -Path $dir `
-            -Force |
-            Out-Null
-
-          $iso = "$dir\android-x86_64-9.0-r2.iso"
-
-          Write-Host "Downloading Android-x86 9.0-r2..."
-
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-
-            Write-Host "Attempt $attempt/3"
-
-            Remove-Item `
-              $iso `
-              -Force `
-              -ErrorAction SilentlyContinue
-
-            try {
-
-              Invoke-WebRequest `
-                -Uri $env:ANDROID_ISO_URL `
-                -OutFile $iso `
-                -UseBasicParsing `
-                -TimeoutSec 1800
-
-            }
-            catch {
-
-              Write-Host "Download error:"
-              Write-Host $_.Exception.Message
-
-            }
-
-            if (Test-Path $iso) {
-
-              $size = (Get-Item $iso).Length
-
-              Write-Host "Downloaded: $size bytes"
-
-              if ($size -gt 800MB) {
-                break
-              }
-
-              Write-Host "File is too small."
-
-            }
-
-            Start-Sleep -Seconds 5
-          }
-
-          if (!(Test-Path $iso)) {
-            throw "Android ISO download failed."
-          }
-
-          $size = (Get-Item $iso).Length
-
-          if ($size -lt 800MB) {
-            throw "Downloaded file is not a real ISO."
-          }
-
-          Write-Host "ISO size: $size bytes"
-
-          # Official 64-bit Android-x86 9.0-r2 SHA1
-          $expected = "1cc85b5ed7c830ff71aecf8405c7281a9c995aa0"
-
-          $actual = (
-            Get-FileHash `
-              -Path $iso `
-              -Algorithm SHA1
-          ).Hash.ToLower()
-
-          Write-Host "SHA1: $actual"
-
-          if ($actual -ne $expected) {
-            throw "Android ISO SHA1 verification failed."
-          }
-
-          Write-Host "ANDROID ISO VERIFIED."
-
-      # ==============================
-      # CREATE DISK
-      # ==============================
-
-      - name: Create Android Disk
-        shell: powershell
+      - name: Show RDP Information
         run: |
-          $ErrorActionPreference = "Stop"
+          echo ""
+          echo "======================================"
+          echo "       UBUNTU 24.04 XFCE RDP"
+          echo "======================================"
+          echo "Address : $TAILSCALE_IP"
+          echo "Port    : 3389"
+          echo "User    : rdpuser"
+          echo "Desktop : XFCE"
+          echo "======================================"
+          echo ""
 
-          $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
+          echo "Use Microsoft Remote Desktop:"
+          echo "Computer: $TAILSCALE_IP:3389"
+          echo "Username: rdpuser"
 
-          & $env:QEMU_IMG `
-            create `
-            -f qcow2 `
-            "$disk" `
-            16G
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not create Android disk."
-          }
-
-          Write-Host "16 GB Android disk created."
-
-      # ==============================
-      # START VM
-      # ==============================
-
-      - name: Start Android VM
-        shell: powershell
+      - name: Keep RDP Alive
         run: |
-          $ErrorActionPreference = "Stop"
-
-          $iso = "$env:GITHUB_WORKSPACE\android\android-x86_64-9.0-r2.iso"
-          $disk = "$env:GITHUB_WORKSPACE\android\android.qcow2"
-
-          if (!(Test-Path $iso)) {
-            throw "Android ISO missing."
-          }
-
-          if (!(Test-Path $disk)) {
-            throw "Android disk missing."
-          }
-
-          $args = @(
-            "-name", "AndroidVM",
-            "-m", "2048",
-            "-smp", "2",
-            "-machine", "q35",
-            "-cpu", "max",
-            "-drive", "file=$disk,format=qcow2",
-            "-cdrom", $iso,
-            "-boot", "d",
-            "-vga", "std",
-            "-display", "none",
-            "-device", "usb-tablet",
-            "-netdev", "user,id=net0",
-            "-device", "e1000,netdev=net0",
-            "-vnc", "127.0.0.1:1"
-          )
-
-          $vm = Start-Process `
-            -FilePath $env:QEMU_PATH `
-            -ArgumentList $args `
-            -WindowStyle Hidden `
-            -PassThru
-
-          Start-Sleep -Seconds 15
-
-          if ($vm.HasExited) {
-            throw "Android VM exited. Exit code: $($vm.ExitCode)"
-          }
-
-          Write-Host "Android VM started."
-          Write-Host "QEMU PID: $($vm.Id)"
-          Write-Host "VNC: 127.0.0.1:5901"
-
-      # ==============================
-      # VERIFY RDP
-      # ==============================
-
-      - name: Verify RDP
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Start-Sleep -Seconds 5
-
-          $test = Test-NetConnection `
-            -ComputerName "127.0.0.1" `
-            -Port 3389 `
-            -WarningAction SilentlyContinue
-
-          if (!$test.TcpTestSucceeded) {
-            throw "RDP port 3389 is not listening."
-          }
-
-          Write-Host "RDP is ready."
-
-      # ==============================
-      # SHOW LOGIN
-      # ==============================
-
-      - name: Show RDP Details
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "======================================"
-          Write-Host "RDP READY"
-          Write-Host "======================================"
-          Write-Host "Address : $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "======================================"
-          Write-Host ""
-          Write-Host "Android VM:"
-          Write-Host "RAM : 2048 MB"
-          Write-Host "CPU : 2"
-          Write-Host "Disk: 16 GB"
-          Write-Host "======================================"
-
-      # ==============================
-      # KEEP ALIVE
-      # ==============================
-
-      - name: Keep Alive
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          while ($true) {
-
-            $vm = Get-Process `
-              -Name "qemu-system-x86_64" `
-              -ErrorAction SilentlyContinue
-
-            if (!$vm) {
-              Write-Host "Android VM stopped."
-              exit 1
-            }
-
-            Write-Host "[$(Get-Date)] Android VM + RDP active."
-
-            Start-Sleep -Seconds 300
-          }
+          while true; do
+            echo "[$(date)] Ubuntu XFCE RDP is running..."
+            sleep 300
+          done
