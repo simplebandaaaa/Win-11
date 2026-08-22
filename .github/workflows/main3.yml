@@ -1,4 +1,4 @@
-name: Ubuntu XFCE RDP + Tailscale
+name: Fast Ubuntu XFCE RDP
 
 on:
   workflow_dispatch:
@@ -6,19 +6,14 @@ on:
 jobs:
   rdp:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 350
 
     steps:
-
-      - name: Update Ubuntu
-        run: |
-          sudo apt-get update
-
       - name: Install XFCE + XRDP
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             xfce4 \
-            xfce4-goodies \
             xrdp \
             dbus-x11
 
@@ -26,45 +21,44 @@ jobs:
         run: |
           sudo useradd -m -s /bin/bash rdpuser
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
-          sudo usermod -aG sudo rdpuser
 
       - name: Configure XFCE
         run: |
-          echo "startxfce4" | sudo tee /home/rdpuser/.xsession
+          echo 'startxfce4' | sudo tee /home/rdpuser/.xsession >/dev/null
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
 
-          sudo sed -i 's/^test -x/#test -x/' /etc/xrdp/startwm.sh
-          sudo sed -i 's/^exec/#exec/' /etc/xrdp/startwm.sh
+          sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOF'
+          #!/bin/sh
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          exec startxfce4
+          EOF
 
-          echo "startxfce4" | sudo tee -a /etc/xrdp/startwm.sh
           sudo chmod +x /etc/xrdp/startwm.sh
 
       - name: Start XRDP
         run: |
-          sudo systemctl enable xrdp
-          sudo systemctl restart xrdp
+          sudo systemctl enable --now xrdp
+          sudo ss -lntp | grep ':3389'
 
       - name: Connect Tailscale
         uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          tags: tag:ci
 
-      - name: Show Tailscale IP
+      - name: Show RDP information
         run: |
-          sleep 5
-          echo "======================================"
+          sleep 3
+          echo "=============================="
           echo "TAILSCALE IP:"
-          tailscale ip -4
-          echo "======================================"
-          echo "RDP USER: rdpuser"
-          echo "RDP PASSWORD: Ubuntu@12345"
-          echo "RDP PORT: 3389"
-          echo "======================================"
+          sudo tailscale ip -4
+          echo "=============================="
+          echo "USERNAME: rdpuser"
+          echo "PASSWORD: Ubuntu@12345"
+          echo "PORT: 3389"
+          echo "=============================="
 
-      - name: Keep RDP alive
+      - name: Keep alive
         run: |
-          while true; do
-            echo "RDP is running..."
-            sleep 60
-          done
+          while true; do sleep 60; done
