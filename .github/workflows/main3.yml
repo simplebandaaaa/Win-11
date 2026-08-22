@@ -9,7 +9,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Full Desktop Environment & XRDP
+      - name: Install Desktop Environment & XRDP
         run: |
           sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
@@ -17,7 +17,6 @@ jobs:
             xfce4-goodies \
             xrdp \
             dbus-x11 \
-            x11-xserver-utils \
             xorgxrdp \
             netcat-openbsd
 
@@ -39,8 +38,8 @@ jobs:
           echo "$USERNAME:$PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo $USERNAME
 
-          # Global / Default X session clean fix
-          sudo bash -c 'cat << "EOF" > /etc/skel/.xsession
+          # XFCE Session wrapper (No polkit required)
+          sudo bash -c 'cat << "EOF" > /home/rdpuser/.xsession
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
           export XDG_CONFIG_DIRS="/etc/xdg"
@@ -48,19 +47,8 @@ jobs:
           exec dbus-run-session xfce4-session
           EOF'
 
-          # User specific setup
-          sudo cp /etc/skel/.xsession /home/$USERNAME/.xsession
-          sudo chown $USERNAME:$USERNAME /home/$USERNAME/.xsession
-
-          # Disable system-d / polkit prompts in XRDP session
-          sudo bash -c 'cat << "EOF" > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla
-          [Allow Colord all Users]
-          Identity=unix-user:*
-          Action=org.freedesktop.color-manager.*
-          ResultAny=no
-          ResultInactive=no
-          ResultActive=yes
-          EOF'
+          # Fix permissions
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
 
           echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
           echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
