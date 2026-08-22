@@ -1,4 +1,4 @@
-name: Ubuntu XFCE RDP
+name: Ubuntu XFCE RDP + Tailscale
 
 on:
   workflow_dispatch:
@@ -9,29 +9,18 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Update system
+
+      - name: Update Ubuntu
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-      - name: Install XFCE and xrdp
+      - name: Install XFCE + XRDP
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xfce4 xfce4-goodies xrdp dbus-x11
-
-      - name: Configure XFCE for xrdp
-        run: |
-          echo "startxfce4" > ~/.xsession
-
-          sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
-          #!/bin/sh
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_SESSION_DESKTOP=xfce
-          export DESKTOP_SESSION=xfce
-          startxfce4
-          EOF'
-
-          sudo chmod +x /etc/xrdp/startwm.sh
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            dbus-x11
 
       - name: Create RDP user
         run: |
@@ -39,17 +28,43 @@ jobs:
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
           sudo usermod -aG sudo rdpuser
 
-      - name: Start xrdp
+      - name: Configure XFCE
+        run: |
+          echo "startxfce4" | sudo tee /home/rdpuser/.xsession
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+
+          sudo sed -i 's/^test -x/#test -x/' /etc/xrdp/startwm.sh
+          sudo sed -i 's/^exec/#exec/' /etc/xrdp/startwm.sh
+
+          echo "startxfce4" | sudo tee -a /etc/xrdp/startwm.sh
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+      - name: Start XRDP
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          sudo systemctl status xrdp --no-pager
 
-      - name: Keep runner alive
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+
+      - name: Show Tailscale IP
         run: |
-          echo "================================="
-          echo "Ubuntu XFCE RDP is running"
-          echo "Username: rdpuser"
-          echo "Password: Ubuntu@12345"
-          echo "================================="
-          sleep 21600
+          sleep 5
+          echo "======================================"
+          echo "TAILSCALE IP:"
+          tailscale ip -4
+          echo "======================================"
+          echo "RDP USER: rdpuser"
+          echo "RDP PASSWORD: Ubuntu@12345"
+          echo "RDP PORT: 3389"
+          echo "======================================"
+
+      - name: Keep RDP alive
+        run: |
+          while true; do
+            echo "RDP is running..."
+            sleep 60
+          done
