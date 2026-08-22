@@ -9,15 +9,21 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Desktop Environment & XRDP
+      - name: Install Full Desktop Environment & XRDP
         run: |
           sudo apt-get update
-          sudo apt-get install -y xfce4 xfce4-goodies xrdp dbus-x11 netcat-openbsd
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
+            xfce4 \
+            xfce4-goodies \
+            xrdp \
+            dbus-x11 \
+            x11-xserver-utils \
+            xorgxrdp \
+            netcat-openbsd
 
-          # XRDP ke SSL permissions fix karein
           sudo adduser xrdp ssl-cert
 
-      - name: Create RDP User & Configure Session
+      - name: Create RDP User & Setup Desktop Session
         run: |
           USERNAME="rdpuser"
           PASSWORD="${{ secrets.MY_RDP_PASSWORD }}"
@@ -28,14 +34,33 @@ jobs:
 
           echo "::add-mask::$PASSWORD"
 
-          # User create karein
+          # User creation
           sudo useradd -m -s /bin/bash $USERNAME
           echo "$USERNAME:$PASSWORD" | sudo chpasswd
           sudo usermod -aG sudo $USERNAME
 
-          # XFCE Session to rdpuser home directory (MAIN FIX FOR FAILSAFE ERROR)
-          echo "startxfce4" | sudo tee /home/$USERNAME/.xsession
+          # Global / Default X session clean fix
+          sudo bash -c 'cat << "EOF" > /etc/skel/.xsession
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS="/etc/xdg"
+          export XDG_DATA_DIRS="/usr/local/share:/usr/share"
+          exec dbus-run-session xfce4-session
+          EOF'
+
+          # User specific setup
+          sudo cp /etc/skel/.xsession /home/$USERNAME/.xsession
           sudo chown $USERNAME:$USERNAME /home/$USERNAME/.xsession
+
+          # Disable system-d / polkit prompts in XRDP session
+          sudo bash -c 'cat << "EOF" > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla
+          [Allow Colord all Users]
+          Identity=unix-user:*
+          Action=org.freedesktop.color-manager.*
+          ResultAny=no
+          ResultInactive=no
+          ResultActive=yes
+          EOF'
 
           echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
           echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
@@ -57,7 +82,7 @@ jobs:
         run: |
           sudo service xrdp stop || true
           
-          # Manually daemons start karein
+          # Force start daemons
           sudo xrdp-sesman
           sudo xrdp
           
