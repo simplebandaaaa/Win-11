@@ -9,13 +9,15 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Install XFCE XRDP
+
+      - name: Install desktop
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             xfce4 \
             xfce4-goodies \
             xfce4-session \
+            xfconf \
             xrdp \
             dbus-x11
 
@@ -25,39 +27,60 @@ jobs:
           echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
           sudo usermod -aG sudo rdpuser
 
-      - name: Configure XFCE session
+      - name: Fix XFCE environment
         run: |
-          sudo -u rdpuser bash -c 'printf "%s\n" "xfce4-session" > /home/rdpuser/.xsession'
+          sudo mkdir -p /etc/xdg/xdg-xfce
+
+          sudo bash -c 'cat > /home/rdpuser/.xsession <<EOF
+          #!/bin/sh
+          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg:/etc"
+          export XDG_CONFIG_HOME="/home/rdpuser/.config"
+          export XDG_CURRENT_DESKTOP="XFCE"
+          export XDG_SESSION_DESKTOP="xfce"
+          export DESKTOP_SESSION="xfce"
+          export LANG="C.UTF-8"
+          export LC_ALL="C.UTF-8"
+
+          exec dbus-run-session -- xfce4-session
+          EOF'
+
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-          sudo chmod 644 /home/rdpuser/.xsession
+          sudo chmod +x /home/rdpuser/.xsession
 
           sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
           #!/bin/sh
 
+          export XDG_CONFIG_DIRS="/etc/xdg/xdg-xfce:/etc/xdg:/etc"
+          export XDG_CONFIG_HOME="/home/rdpuser/.config"
+          export XDG_CURRENT_DESKTOP="XFCE"
+          export XDG_SESSION_DESKTOP="xfce"
+          export DESKTOP_SESSION="xfce"
+          export LANG="C.UTF-8"
+          export LC_ALL="C.UTF-8"
+
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
 
-          if [ -r /etc/profile ]; then
-              . /etc/profile
-          fi
-
-          if [ -r /etc/default/locale ]; then
-              . /etc/default/locale
-              export LANG LANGUAGE
-          fi
-
-          exec /etc/X11/Xsession
+          exec /home/rdpuser/.xsession
           EOF'
 
           sudo chmod +x /etc/xrdp/startwm.sh
 
-      - name: Enable and restart XRDP
+      - name: Prepare user config
+        run: |
+          sudo -u rdpuser mkdir -p /home/rdpuser/.config/xfce4
+          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
+
+      - name: Restart XRDP
         run: |
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
           sleep 3
-          sudo systemctl is-active --quiet xrdp
-          echo "XRDP is running"
+
+          echo "XRDP STATUS:"
+          sudo systemctl --no-pager status xrdp
+
+          echo "XRDP PORT:"
           sudo ss -lntp | grep ':3389'
 
       - name: Check Tailscale secret
@@ -65,7 +88,7 @@ jobs:
           TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
           if [ -z "$TS_KEY" ]; then
-            echo "ERROR: TAILSCALE_AUTHKEY is missing"
+            echo "TAILSCALE_AUTHKEY is missing"
             exit 1
           fi
           echo "Tailscale secret found"
@@ -75,19 +98,25 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Show connection details
+      - name: Show RDP information
         run: |
           sleep 3
-          echo "================================"
-          echo "TAILSCALE IP:"
-          sudo tailscale ip -4
-          echo "================================"
-          echo "RDP USER: rdpuser"
-          echo "RDP PASSWORD: Ubuntu@12345"
-          echo "RDP PORT: 3389"
-          echo "================================"
 
-      - name: Keep runner alive
+          echo "===================================="
+          echo "TAILSCALE IP"
+          echo "===================================="
+          sudo tailscale ip -4
+
+          echo ""
+          echo "===================================="
+          echo "RDP LOGIN"
+          echo "===================================="
+          echo "Username: rdpuser"
+          echo "Password: Ubuntu@12345"
+          echo "Port: 3389"
+          echo "===================================="
+
+      - name: Keep alive
         run: |
           while true; do
             sleep 60
