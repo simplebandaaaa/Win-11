@@ -1,94 +1,55 @@
-name: Linux RDP
+name: Ubuntu XFCE RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-linux-rdp:
-    runs-on: ubuntu-latest
+  rdp:
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-      - name: Install Desktop Environment & XRDP
+      - name: Update system
         run: |
           sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y \
-            xfce4 \
-            xfce4-goodies \
-            xrdp \
-            dbus-x11 \
-            xorgxrdp \
-            netcat-openbsd
+          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-          sudo adduser xrdp ssl-cert
-
-      - name: Create RDP User & Setup Desktop Session
+      - name: Install XFCE and xrdp
         run: |
-          USERNAME="rdpuser"
-          PASSWORD="${{ secrets.MY_RDP_PASSWORD }}"
-          
-          if [ -z "$PASSWORD" ]; then
-            PASSWORD="SecurePass@2026!"
-          fi
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xrdp dbus-x11
 
-          echo "::add-mask::$PASSWORD"
+      - name: Configure XFCE for xrdp
+        run: |
+          echo "startxfce4" > ~/.xsession
 
-          # User creation
-          sudo useradd -m -s /bin/bash $USERNAME
-          echo "$USERNAME:$PASSWORD" | sudo chpasswd
-          sudo usermod -aG sudo $USERNAME
-
-          # XFCE Session wrapper (No polkit required)
-          sudo bash -c 'cat << "EOF" > /home/rdpuser/.xsession
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-          export XDG_CONFIG_DIRS="/etc/xdg"
-          export XDG_DATA_DIRS="/usr/local/share:/usr/share"
-          exec dbus-run-session xfce4-session
+          sudo bash -c 'cat > /etc/xrdp/startwm.sh <<EOF
+          #!/bin/sh
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_SESSION_DESKTOP=xfce
+          export DESKTOP_SESSION=xfce
+          startxfce4
           EOF'
 
-          # Fix permissions
-          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+          sudo chmod +x /etc/xrdp/startwm.sh
 
-          echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
-          echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-
-      - name: Install & Configure Tailscale
+      - name: Create RDP user
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-linux-runner-$GITHUB_RUN_ID
+          sudo useradd -m -s /bin/bash rdpuser
+          echo 'rdpuser:Ubuntu@12345' | sudo chpasswd
+          sudo usermod -aG sudo rdpuser
 
-          TS_IP=$(tailscale ip -4)
-          if [ -z "$TS_IP" ]; then
-            echo "Failed to get Tailscale IP"
-            exit 1
-          fi
-
-          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
-
-      - name: Start & Verify RDP Port Status
+      - name: Start xrdp
         run: |
-          sudo service xrdp stop || true
-          
-          # Force start daemons
-          sudo xrdp-sesman
-          sudo xrdp
-          
-          sleep 3
-          nc -zv 127.0.0.1 3389 || exit 1
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sudo systemctl status xrdp --no-pager
 
-      - name: Maintain Connection
+      - name: Keep runner alive
         run: |
-          echo ""
-          echo "=== LINUX RDP ACCESS ESTABLISHED ==="
-          echo "IP Address: $TAILSCALE_IP"
-          echo "Username:   $RDP_USER"
-          echo "Password:   [HIDDEN BY LOG MASK]"
-          echo "RDP Port:   3389"
-          echo "===================================="
-          echo ""
-
-          while true; do
-            echo "[$(date)] Linux RDP Active..."
-            sleep 300
-          done
+          echo "================================="
+          echo "Ubuntu XFCE RDP is running"
+          echo "Username: rdpuser"
+          echo "Password: Ubuntu@12345"
+          echo "================================="
+          sleep 21600
