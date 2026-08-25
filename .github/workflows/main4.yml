@@ -1,29 +1,19 @@
-name: Cloud Android Emulator
+name: Free Cloud Android
 
 on:
   workflow_dispatch:
 
 jobs:
-  emulator:
+  android:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 330
 
     steps:
       - name: Check KVM
         run: |
-          echo "=== KVM CHECK ==="
-          if [ -e /dev/kvm ]; then
-            ls -l /dev/kvm
-            echo "KVM is available."
-          else
-            echo "ERROR: /dev/kvm is NOT available."
-            echo "GitHub-hosted runner cannot run the accelerated Android emulator."
-            exit 1
-          fi
-
-      - name: Install Docker
-        run: |
-          docker --version
+          echo "Checking KVM..."
+          test -e /dev/kvm
+          ls -l /dev/kvm
 
       - name: Pull Android Emulator
         run: |
@@ -33,18 +23,49 @@ jobs:
       - name: Start Android Emulator
         run: |
           docker run -d \
-            --name android-emulator \
+            --name android \
             --device /dev/kvm \
+            --mount type=tmpfs,destination=/data \
             --publish 8554:8554/tcp \
             --publish 5555:5555/tcp \
             us-docker.pkg.dev/android-emulator-268719/images/30-google-x64:30.1.2
 
-      - name: Show emulator logs
+      - name: Wait for Android
         run: |
-          sleep 20
-          docker logs android-emulator
+          echo "Waiting for emulator..."
 
-      - name: Check emulator
-        run: |
+          for i in $(seq 1 180); do
+            if docker exec android \
+              adb shell getprop sys.boot_completed 2>/dev/null \
+              | tr -d '\r' | grep -q '^1$'; then
+              echo "ANDROID_BOOT_COMPLETED=1"
+              break
+            fi
+
+            sleep 2
+          done
+
           docker ps
-          docker inspect android-emulator
+          docker logs --tail 100 android
+
+      - name: Verify WebRTC port
+        run: |
+          echo "=== PORT 8554 ==="
+          ss -lntp | grep 8554 || true
+
+          echo "=== PORT 5555 ==="
+          ss -lntp | grep 5555 || true
+
+          echo "=== CONTAINER ==="
+          docker ps
+
+      - name: Keep emulator alive
+        run: |
+          echo "Android emulator is running."
+          echo "GitHub runner will remain active while this job is running."
+
+          while true; do
+            echo "[$(date)] Android emulator alive..."
+            docker ps --filter name=android
+            sleep 60
+          done
