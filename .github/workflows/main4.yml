@@ -1,4 +1,4 @@
-name: Free Cloud Android
+name: Free Cloud Android WebRTC
 
 on:
   workflow_dispatch:
@@ -9,6 +9,9 @@ jobs:
     timeout-minutes: 330
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Check KVM
         run: |
           echo "Checking KVM..."
@@ -20,52 +23,88 @@ jobs:
           docker pull \
             us-docker.pkg.dev/android-emulator-268719/images/30-google-x64:30.1.2
 
-      - name: Start Android Emulator
+      - name: Start Emulator
         run: |
           docker run -d \
             --name android \
             --device /dev/kvm \
             --mount type=tmpfs,destination=/data \
-            --publish 8554:8554/tcp \
-            --publish 5555:5555/tcp \
+            -p 8554:8554 \
+            -p 5555:5555 \
             us-docker.pkg.dev/android-emulator-268719/images/30-google-x64:30.1.2
 
-      - name: Wait for Android
+      - name: Wait for Emulator
         run: |
-          echo "Waiting for emulator..."
+          echo "Waiting for Android..."
 
           for i in $(seq 1 180); do
             if docker exec android \
               adb shell getprop sys.boot_completed 2>/dev/null \
               | tr -d '\r' | grep -q '^1$'; then
-              echo "ANDROID_BOOT_COMPLETED=1"
+              echo "Android boot completed."
               break
             fi
-
             sleep 2
           done
 
           docker ps
-          docker logs --tail 100 android
 
-      - name: Verify WebRTC port
+      - name: Install Gateway dependencies
         run: |
-          echo "=== PORT 8554 ==="
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-venv \
+            python3-pip \
+            git
+
+      - name: Download Google WebRTC Gateway
+        run: |
+          git clone --depth 1 \
+            https://github.com/google/android-emulator-container-scripts.git \
+            /tmp/android-emulator-container-scripts
+
+      - name: Start WebRTC Gateway
+        run: |
+          cd /tmp/android-emulator-container-scripts/gateway
+
+          chmod +x setup_env.sh
+
+          ./setup_env.sh
+
+          source venv/bin/activate
+
+          nohup videobridge-gateway \
+            --port=8080 \
+            --emulator_host=127.0.0.1 \
+            --emulator_port=8554 \
+            > /tmp/gateway.log 2>&1 &
+
+          sleep 5
+
+          echo "=== Gateway ==="
+          cat /tmp/gateway.log || true
+
+      - name: Check Gateway
+        run: |
+          echo "=== Port 8080 ==="
+          ss -lntp | grep 8080 || true
+
+          echo "=== Port 8554 ==="
           ss -lntp | grep 8554 || true
 
-          echo "=== PORT 5555 ==="
-          ss -lntp | grep 5555 || true
-
-          echo "=== CONTAINER ==="
+          echo "=== Emulator ==="
           docker ps
 
-      - name: Keep emulator alive
+      - name: Keep Android online
         run: |
-          echo "Android emulator is running."
-          echo "GitHub runner will remain active while this job is running."
+          echo "======================================"
+          echo "ANDROID EMULATOR IS RUNNING"
+          echo "WEBRTC GATEWAY IS RUNNING"
+          echo "======================================"
 
           while true; do
-            echo "[$(date)] Android emulator alive..."
+            echo "[$(date -u)] Android + WebRTC alive"
             docker ps --filter name=android
             sleep 60
           done
