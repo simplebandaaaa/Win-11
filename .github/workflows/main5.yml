@@ -1,0 +1,114 @@
+name: Windows Gaming RDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  rdp:
+    runs-on: windows-2025
+    timeout-minutes: 350
+
+    steps:
+      - name: Enable RDP
+        shell: powershell
+        run: |
+          Write-Host "Enabling Remote Desktop..."
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
+
+      - name: Create RDP User
+        shell: powershell
+        run: |
+          $username = "gamer"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser `
+                -Name $username `
+                -Password $secure `
+                -AccountNeverExpires `
+                -PasswordNeverExpires
+          } else {
+              Set-LocalUser `
+                -Name $username `
+                -Password $secure
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+      - name: Install Gaming Components
+        shell: powershell
+        run: |
+          Write-Host "Installing useful components..."
+
+          winget install `
+            --id Microsoft.DirectX `
+            --silent `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            -e `
+            2>$null
+
+          Write-Host "Gaming setup complete."
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          audience: ${{ secrets.TS_AUDIENCE }}
+          tags: tag:ci
+
+      - name: Get RDP Address
+        shell: powershell
+        run: |
+          $ip = (tailscale ip -4).Trim()
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "       WINDOWS GAMING RDP READY"
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "RDP Address : $ip"
+          Write-Host "Username    : gamer"
+          Write-Host "Port        : 3389"
+          Write-Host ""
+          Write-Host "Connect using:"
+          Write-Host "Windows Remote Desktop / Microsoft Remote Desktop"
+          Write-Host ""
+          Write-Host "=============================================="
+
+      - name: Keep RDP Alive
+        shell: powershell
+        run: |
+          Write-Host "RDP is running..."
+          Write-Host "Do NOT stop this workflow while using the VM."
+
+          while ($true) {
+              $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              Write-Host "$ts - Windows RDP alive"
+              Start-Sleep -Seconds 60
+          }
