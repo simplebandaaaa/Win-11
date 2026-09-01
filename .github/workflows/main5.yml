@@ -1,32 +1,42 @@
-name: RDP + Fast MEmu
+name: RDP + MEmu Fast
 
 on:
   workflow_dispatch:
 
 jobs:
-  rdp-memu:
+  secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 3600
 
     steps:
 
       # ============================================================
-      # RDP
+      # CONFIGURE RDP
       # ============================================================
-      - name: Configure RDP
+      - name: Configure Core RDP Settings
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "============================================================"
+          Write-Host " CONFIGURING RDP"
+          Write-Host "============================================================"
+
           Set-ItemProperty `
-            "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name fDenyTSConnections `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
             -Value 0 `
             -Force
 
           Set-ItemProperty `
-            "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name UserAuthentication `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "SecurityLayer" `
             -Value 0 `
             -Force
 
@@ -41,71 +51,91 @@ jobs:
 
           Restart-Service TermService -Force
 
-          Write-Host "RDP ready."
+          Write-Host "RDP configured."
 
 
       # ============================================================
-      # RDP USER
+      # CREATE RDP USER
       # ============================================================
       - name: Create RDP User
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "============================================================"
+          Write-Host " CREATING RDP USER"
+          Write-Host "============================================================"
+
           $password = "${{ secrets.MY_RDP_PASSWORD }}"
 
           if ([string]::IsNullOrWhiteSpace($password)) {
               $password = "SecurePass@2026!"
+              Write-Host "MY_RDP_PASSWORD secret not found; using fallback password."
           }
 
-          $secure = ConvertTo-SecureString `
+          $securePassword = ConvertTo-SecureString `
             $password `
             -AsPlainText `
             -Force
 
-          $user = Get-LocalUser `
-            -Name RDP `
+          $existing = Get-LocalUser `
+            -Name "RDP" `
             -ErrorAction SilentlyContinue
 
-          if ($user) {
+          if ($existing) {
+
+              Write-Host "RDP user already exists."
+
               Set-LocalUser `
-                -Name RDP `
-                -Password $secure
-          }
-          else {
+                -Name "RDP" `
+                -Password $securePassword
+
+          } else {
+
               New-LocalUser `
-                -Name RDP `
-                -Password $secure `
+                -Name "RDP" `
+                -Password $securePassword `
                 -AccountNeverExpires `
-                -PasswordNeverExpires
+                -PasswordNeverExpires `
+                -Description "GitHub Actions RDP User"
           }
 
           Add-LocalGroupMember `
-            Administrators `
-            RDP `
+            -Group "Administrators" `
+            -Member "RDP" `
             -ErrorAction SilentlyContinue
 
           Add-LocalGroupMember `
-            "Remote Desktop Users" `
-            RDP `
+            -Group "Remote Desktop Users" `
+            -Member "RDP" `
             -ErrorAction SilentlyContinue
 
           "RDP_PASSWORD=$password" |
             Out-File `
-              $env:GITHUB_ENV `
+              -FilePath $env:GITHUB_ENV `
               -Encoding utf8 `
               -Append
+
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              throw "RDP user creation failed."
+          }
+
+          Write-Host "RDP user ready."
 
 
       # ============================================================
       # WINDOWS PERFORMANCE
       # ============================================================
-      - name: Optimize Windows
+      - name: Optimize Windows For RDP
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
 
-          # High performance
+          Write-Host "============================================================"
+          Write-Host " OPTIMIZING WINDOWS"
+          Write-Host "============================================================"
+
+          # High performance power plan
           powercfg /setactive SCHEME_MIN 2>$null
 
           # Disable transparency
@@ -124,7 +154,7 @@ jobs:
             /d 1 `
             /f | Out-Null
 
-          # Disable RDP animations
+          # Disable menu animations
           reg add `
             "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
             /v fDisableMenuAnims `
@@ -132,7 +162,47 @@ jobs:
             /d 1 `
             /f | Out-Null
 
+          # Disable full-window dragging
+          reg add `
+            "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+            /v fDisableFullWindowDrag `
+            /t REG_DWORD `
+            /d 1 `
+            /f | Out-Null
+
           Write-Host "Windows optimized."
+
+
+      # ============================================================
+      # CHECK RUNNER
+      # ============================================================
+      - name: Check Runner Hardware
+        shell: powershell
+        run: |
+          Write-Host "============================================================"
+          Write-Host " RUNNER INFORMATION"
+          Write-Host "============================================================"
+
+          $cpu = Get-CimInstance Win32_Processor
+
+          Write-Host "CPU:"
+          Write-Host $cpu.Name
+
+          Write-Host "CPU Cores:"
+          Write-Host $cpu.NumberOfCores
+
+          Write-Host "Logical CPUs:"
+          Write-Host $cpu.NumberOfLogicalProcessors
+
+          Write-Host "Virtualization:"
+          Write-Host $cpu.VirtualizationFirmwareEnabled
+
+          Write-Host ""
+          Write-Host "GPU:"
+
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name, DriverVersion |
+            Format-Table -AutoSize
 
 
       # ============================================================
@@ -143,113 +213,180 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "============================================================"
+          Write-Host " DOWNLOADING MEMU PLAY"
+          Write-Host "============================================================"
+
           $installer = "$env:TEMP\MEmu-Setup.exe"
 
           $url = "https://www.memuplay.com/download.php?file_name=Memu-Setup"
-
-          Write-Host "Downloading MEmu..."
 
           Remove-Item `
             $installer `
             -Force `
             -ErrorAction SilentlyContinue
 
-          # 3 retries, 90 sec maximum per attempt
+          Write-Host "URL:"
+          Write-Host $url
+          Write-Host ""
+
+          Write-Host "Starting download..."
+
           & curl.exe `
             -L `
             "--fail" `
             "--retry" "2" `
             "--retry-delay" "2" `
             "--connect-timeout" "10" `
-            "--max-time" "90" `
+            "--max-time" "180" `
             "-A" "Mozilla/5.0" `
             "-o" $installer `
             $url
 
           if ($LASTEXITCODE -ne 0) {
-              throw "MEmu download failed."
+              throw "MEmu download failed. curl exit code: $LASTEXITCODE"
           }
 
           if (-not (Test-Path $installer)) {
-              throw "MEmu installer missing."
+              throw "MEmu installer was not created."
           }
 
           $size = (Get-Item $installer).Length
 
-          Write-Host "Installer size: $size bytes"
+          Write-Host ""
+          Write-Host "Downloaded size: $size bytes"
 
           if ($size -lt 1000000) {
-              throw "Downloaded MEmu installer is invalid."
+              throw "Downloaded MEmu file is too small."
           }
 
-          $bytes = [System.IO.File]::ReadAllBytes($installer)
+          # Verify EXE header
+          $stream = [System.IO.File]::OpenRead($installer)
 
-          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
-              throw "Downloaded file is not an EXE."
+          try {
+              $a = $stream.ReadByte()
+              $b = $stream.ReadByte()
+          }
+          finally {
+              $stream.Dispose()
+          }
+
+          if ($a -ne 0x4D -or $b -ne 0x5A) {
+              throw "Downloaded file is not a valid Windows EXE."
           }
 
           "MEMU_INSTALLER=$installer" |
             Out-File `
-              $env:GITHUB_ENV `
+              -FilePath $env:GITHUB_ENV `
               -Encoding utf8 `
               -Append
 
-          Write-Host "MEmu download complete."
+          Write-Host "MEmu installer downloaded successfully."
 
 
       # ============================================================
-      # FAST INSTALL WITH HARD TIMEOUT
+      # INSTALL MEMU - CORRECTED
       # ============================================================
-      - name: Install MEmu - 5 Minute Timeout
+      - name: Install MEmu
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
 
-          $installer = $env:MEMU_INSTALLER
-
           Write-Host "============================================================"
           Write-Host " INSTALLING MEMU PLAY"
           Write-Host "============================================================"
-          Write-Host "Hard timeout: 5 minutes"
 
-          # Start installer without blocking PowerShell
-          $p = Start-Process `
+          $installer = $env:MEMU_INSTALLER
+
+          if (-not (Test-Path $installer)) {
+              throw "MEmu installer not found: $installer"
+          }
+
+          Write-Host "Installer:"
+          Write-Host $installer
+          Write-Host ""
+
+          # --------------------------------------------------------
+          # Start silent installer and WAIT for actual exit
+          # --------------------------------------------------------
+          $process = Start-Process `
             -FilePath $installer `
             -ArgumentList "/S" `
-            -PassThru
+            -PassThru `
+            -Wait
 
-          Write-Host "Installer PID: $($p.Id)"
+          Write-Host ""
+          Write-Host "Installer process finished."
+          Write-Host "Installer exit code: $($process.ExitCode)"
 
-          $start = Get-Date
-          $foundMEmu = $false
+          # Give Windows installer services a short moment
+          Start-Sleep -Seconds 5
 
-          while ($true) {
+          # --------------------------------------------------------
+          # Common MEmu installation directories
+          # --------------------------------------------------------
+          $searchPaths = @(
+              "C:\Program Files\Microvirt",
+              "C:\Program Files (x86)\Microvirt",
+              "C:\Program Files\MEmu",
+              "C:\Program Files (x86)\MEmu",
+              "C:\Microvirt",
+              "C:\MEmu",
+              "$env:ProgramData\Microvirt"
+          )
 
-              Start-Sleep -Seconds 5
+          $memuExe = $null
+          $memucExe = $null
 
-              $elapsed = (
-                (Get-Date) - $start
-              ).TotalSeconds
+          Write-Host ""
+          Write-Host "Searching common MEmu directories..."
 
-              # ----------------------------------------------------
-              # Check installer
-              # ----------------------------------------------------
-              $proc = Get-Process `
-                -Id $p.Id `
-                -ErrorAction SilentlyContinue
+          foreach ($path in $searchPaths) {
 
-              if (-not $proc) {
-                  Write-Host "MEmu installer process finished."
+              if (Test-Path $path) {
+
+                  Write-Host "Checking: $path"
+
+                  $candidate = Get-ChildItem `
+                    -Path $path `
+                    -Filter "MEmu.exe" `
+                    -File `
+                    -Recurse `
+                    -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                  if ($candidate) {
+                      $memuExe = $candidate.FullName
+                      break
+                  }
+
+                  if (-not $memucExe) {
+
+                      $candidate = Get-ChildItem `
+                        -Path $path `
+                        -Filter "memuc.exe" `
+                        -File `
+                        -Recurse `
+                        -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+
+                      if ($candidate) {
+                          $memucExe = $candidate.FullName
+                      }
+                  }
               }
-              else {
-                  Write-Host `
-                    "Installing... $([int]$elapsed)s"
-              }
+          }
 
-              # ----------------------------------------------------
-              # Check whether MEmu.exe appeared
-              # ----------------------------------------------------
-              $found = Get-ChildItem `
+          # --------------------------------------------------------
+          # Program Files fallback search
+          # --------------------------------------------------------
+          if (-not $memuExe) {
+
+              Write-Host ""
+              Write-Host "MEmu.exe not found in common locations."
+              Write-Host "Searching Program Files..."
+
+              $candidate = Get-ChildItem `
                 -Path `
                   "C:\Program Files",
                   "C:\Program Files (x86)" `
@@ -259,109 +396,285 @@ jobs:
                 -ErrorAction SilentlyContinue |
                 Select-Object -First 1
 
-              if ($found) {
-
-                  $foundMEmu = $true
-
-                  Write-Host ""
-                  Write-Host "MEmu.exe detected:"
-                  Write-Host $found.FullName
-
-                  break
+              if ($candidate) {
+                  $memuExe = $candidate.FullName
               }
+          }
 
-              # ----------------------------------------------------
-              # 5 minute hard timeout
-              # ----------------------------------------------------
-              if ($elapsed -ge 300) {
+          # --------------------------------------------------------
+          # memuc.exe fallback search
+          # --------------------------------------------------------
+          if (-not $memucExe) {
 
-                  Write-Host ""
-                  Write-Host "MEmu installation exceeded 5 minutes."
+              Write-Host ""
+              Write-Host "Searching for memuc.exe..."
 
-                  if ($proc) {
-                      Write-Host "Stopping stuck installer..."
-                      Stop-Process `
-                        -Id $p.Id `
-                        -Force `
-                        -ErrorAction SilentlyContinue
+              $candidate = Get-ChildItem `
+                -Path `
+                  "C:\Program Files",
+                  "C:\Program Files (x86)",
+                  "C:\Microvirt" `
+                -Filter "memuc.exe" `
+                -File `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+              if ($candidate) {
+                  $memucExe = $candidate.FullName
+              }
+          }
+
+          # --------------------------------------------------------
+          # Registry detection
+          # --------------------------------------------------------
+          Write-Host ""
+          Write-Host "Checking uninstall registry..."
+
+          $registryHits = @()
+
+          $registryPaths = @(
+              "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+              "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+              "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          )
+
+          foreach ($regPath in $registryPaths) {
+
+              $items = Get-ItemProperty `
+                $regPath `
+                -ErrorAction SilentlyContinue
+
+              foreach ($item in $items) {
+
+                  if ($item.DisplayName -match "MEmu|Microvirt") {
+
+                      $registryHits += $item
+
+                      Write-Host ""
+                      Write-Host "MEmu registry entry:"
+                      Write-Host "Name: $($item.DisplayName)"
+                      Write-Host "Version: $($item.DisplayVersion)"
+                      Write-Host "InstallLocation: $($item.InstallLocation)"
                   }
-
-                  throw "MEmu installer timed out after 5 minutes."
               }
           }
 
-          if (-not $foundMEmu) {
-              throw "MEmu.exe was not detected."
+          # --------------------------------------------------------
+          # Use registry InstallLocation if available
+          # --------------------------------------------------------
+          if (-not $memuExe) {
+
+              foreach ($entry in $registryHits) {
+
+                  if (
+                    $entry.InstallLocation -and
+                    (Test-Path $entry.InstallLocation)
+                  ) {
+
+                      Write-Host ""
+                      Write-Host "Checking registry InstallLocation:"
+                      Write-Host $entry.InstallLocation
+
+                      $candidate = Get-ChildItem `
+                        -Path $entry.InstallLocation `
+                        -Filter "MEmu.exe" `
+                        -File `
+                        -Recurse `
+                        -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+
+                      if ($candidate) {
+                          $memuExe = $candidate.FullName
+                          break
+                      }
+
+                      if (-not $memucExe) {
+
+                          $candidate = Get-ChildItem `
+                            -Path $entry.InstallLocation `
+                            -Filter "memuc.exe" `
+                            -File `
+                            -Recurse `
+                            -ErrorAction SilentlyContinue |
+                            Select-Object -First 1
+
+                          if ($candidate) {
+                              $memucExe = $candidate.FullName
+                          }
+                      }
+                  }
+              }
           }
 
-          $memuPath = Split-Path `
-            $found.FullName `
-            -Parent
+          # --------------------------------------------------------
+          # Derive MEmu.exe from memuc.exe
+          # --------------------------------------------------------
+          if (-not $memuExe -and $memucExe) {
 
-          "MEMU_EXE=$($found.FullName)" |
-            Out-File `
-              $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
+              $dir = Split-Path `
+                $memucExe `
+                -Parent
 
-          "MEMU_PATH=$memuPath" |
-            Out-File `
-              $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
+              $candidate = Join-Path `
+                $dir `
+                "MEmu.exe"
 
-          Write-Host "MEmu installation detected."
+              if (Test-Path $candidate) {
+                  $memuExe = $candidate
+              }
+          }
+
+          # --------------------------------------------------------
+          # FINAL RESULT
+          # --------------------------------------------------------
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " MEMU DETECTION RESULT"
+          Write-Host "============================================================"
+
+          Write-Host "MEmu.exe : $memuExe"
+          Write-Host "memuc.exe: $memucExe"
+          Write-Host "Registry : $($registryHits.Count)"
+          Write-Host "ExitCode : $($process.ExitCode)"
+
+          if ($memuExe -or $memucExe) {
+
+              Write-Host ""
+              Write-Host "MEmu installation detected."
+
+              if ($memuExe) {
+
+                  "MEMU_EXE=$memuExe" |
+                    Out-File `
+                      -FilePath $env:GITHUB_ENV `
+                      -Encoding utf8 `
+                      -Append
+
+                  "MEMU_PATH=$(Split-Path $memuExe -Parent)" |
+                    Out-File `
+                      -FilePath $env:GITHUB_ENV `
+                      -Encoding utf8 `
+                      -Append
+              }
+
+              if ($memucExe) {
+
+                  "MEMUC=$memucExe" |
+                    Out-File `
+                      -FilePath $env:GITHUB_ENV `
+                      -Encoding utf8 `
+                      -Append
+              }
+
+              exit 0
+          }
+
+          # --------------------------------------------------------
+          # DIAGNOSTICS
+          # --------------------------------------------------------
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " MEMU WAS NOT DETECTED"
+          Write-Host "============================================================"
+
+          Write-Host ""
+          Write-Host "MEmu/Microvirt directories:"
+
+          Get-ChildItem `
+            -Path "C:\Program Files","C:\Program Files (x86)","C:\" `
+            -Directory `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match "MEmu|Microvirt"
+            } |
+            Select-Object FullName |
+            Format-Table -AutoSize
+
+          Write-Host ""
+          Write-Host "MEmu-related processes:"
+
+          Get-Process `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.ProcessName -match "MEmu|Microvirt"
+            } |
+            Select-Object `
+              Id,
+              ProcessName,
+              CPU,
+              WorkingSet |
+            Format-Table -AutoSize
+
+          Write-Host ""
+          Write-Host "MEmu-related services:"
+
+          Get-Service `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match "MEmu|Microvirt" -or
+              $_.DisplayName -match "MEmu|Microvirt"
+            } |
+            Select-Object `
+              Name,
+              DisplayName,
+              Status |
+            Format-Table -AutoSize
+
+          throw "MEmu installer exited, but MEmu installation was not detected."
 
 
       # ============================================================
-      # FIND MEMUC
+      # VERIFY MEMUC
       # ============================================================
-      - name: Find MEMUC
+      - name: Verify MEmu Control
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "Finding memuc.exe..."
+          Write-Host "============================================================"
+          Write-Host " VERIFYING MEMU"
+          Write-Host "============================================================"
 
-          $memuc = Get-ChildItem `
-            -Path `
-              "C:\Program Files",
-              "C:\Program Files (x86)" `
-            -Filter "memuc.exe" `
-            -File `
-            -Recurse `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($env:MEMUC)) {
+              throw "memuc.exe was not detected."
+          }
 
-          if (-not $memuc) {
-              throw "memuc.exe not found."
+          if (-not (Test-Path $env:MEMUC)) {
+              throw "MEMUC path does not exist: $env:MEMUC"
           }
 
           Write-Host "MEMUC:"
-          Write-Host $memuc.FullName
+          Write-Host $env:MEMUC
 
-          "MEMUC=$($memuc.FullName)" |
-            Out-File `
-              $env:GITHUB_ENV `
-              -Encoding utf8 `
-              -Append
+          Write-Host ""
+          Write-Host "Available VMs:"
+
+          & $env:MEMUC listvms 2>&1 |
+            Out-Host
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "memuc listvms returned exit code $LASTEXITCODE"
+          }
 
 
       # ============================================================
       # MEMU PERFORMANCE CONFIG
       # ============================================================
-      - name: Configure MEmu Fast Mode
+      - name: Configure MEmu For Performance
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
 
           Write-Host "============================================================"
-          Write-Host " MEMU FAST CONFIGURATION"
+          Write-Host " MEMU PERFORMANCE CONFIGURATION"
           Write-Host "============================================================"
 
+          # Default VM index
           $vm = 0
 
-          # CPU
+          Write-Host "Setting CPU: 4"
+
           & $env:MEMUC `
             setconfigex `
             -i $vm `
@@ -370,7 +683,8 @@ jobs:
             2>&1 |
             Out-Host
 
-          # RAM
+          Write-Host "Setting RAM: 4096 MB"
+
           & $env:MEMUC `
             setconfigex `
             -i $vm `
@@ -379,7 +693,8 @@ jobs:
             2>&1 |
             Out-Host
 
-          # 720p = less rendering/RDP bandwidth
+          Write-Host "Setting display: 1280x720 / DPI 160"
+
           & $env:MEMUC `
             setconfigex `
             -i $vm `
@@ -388,7 +703,8 @@ jobs:
             2>&1 |
             Out-Host
 
-          # Fixed resolution
+          Write-Host "Disabling dynamic resize"
+
           & $env:MEMUC `
             setconfigex `
             -i $vm `
@@ -397,7 +713,8 @@ jobs:
             2>&1 |
             Out-Host
 
-          # Cache
+          Write-Host "Setting cache mode"
+
           & $env:MEMUC `
             setconfigex `
             -i $vm `
@@ -406,7 +723,8 @@ jobs:
             2>&1 |
             Out-Host
 
-          Write-Host "MEmu fast configuration applied."
+          Write-Host ""
+          Write-Host "MEmu performance configuration completed."
 
 
       # ============================================================
@@ -417,7 +735,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
 
-          Write-Host "Starting MEmu..."
+          Write-Host "============================================================"
+          Write-Host " STARTING MEMU"
+          Write-Host "============================================================"
 
           & $env:MEMUC `
             start `
@@ -425,18 +745,46 @@ jobs:
             2>&1 |
             Out-Host
 
-          Start-Sleep -Seconds 10
+          Write-Host ""
+          Write-Host "Waiting for MEmu process..."
 
-          Write-Host "MEmu startup command completed."
+          $started = $false
+
+          for ($i = 1; $i -le 20; $i++) {
+
+              $processes = Get-Process `
+                -Name "MEmu","MEmuHeadless","MEmuVM" `
+                -ErrorAction SilentlyContinue
+
+              if ($processes) {
+
+                  $started = $true
+
+                  Write-Host "MEmu process detected."
+                  break
+              }
+
+              Write-Host "Waiting... $i/20"
+
+              Start-Sleep -Seconds 2
+          }
+
+          if (-not $started) {
+              throw "MEmu process did not start."
+          }
 
 
       # ============================================================
-      # BOOST PROCESS
+      # BOOST MEMU
       # ============================================================
-      - name: Boost MEmu Priority
+      - name: Optimize MEmu Process
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
+
+          Write-Host "============================================================"
+          Write-Host " BOOSTING MEMU PROCESS"
+          Write-Host "============================================================"
 
           $names = @(
             "MEmu",
@@ -446,7 +794,7 @@ jobs:
             "MEmuSVC"
           )
 
-          for ($i = 0; $i -lt 10; $i++) {
+          for ($round = 1; $round -le 5; $round++) {
 
               foreach ($name in $names) {
 
@@ -457,6 +805,9 @@ jobs:
 
                       try {
                           $_.PriorityClass = "High"
+
+                          Write-Host `
+                            "$($_.ProcessName) -> High"
                       }
                       catch {}
                   }
@@ -465,68 +816,36 @@ jobs:
               Start-Sleep -Seconds 2
           }
 
-          Write-Host "MEmu priority optimization complete."
+          Write-Host "MEmu process optimization completed."
 
 
       # ============================================================
-      # VERIFY MEMU
-      # ============================================================
-      - name: Verify MEmu
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Continue"
-
-          Write-Host "Checking MEmu..."
-
-          $ok = $false
-
-          for ($i = 1; $i -le 30; $i++) {
-
-              $process = Get-Process `
-                -Name "MEmu","MEmuHeadless","MEmuVM" `
-                -ErrorAction SilentlyContinue
-
-              if ($process) {
-
-                  $ok = $true
-
-                  Write-Host "MEmu RUNNING."
-                  break
-              }
-
-              Write-Host "Waiting for MEmu... $i/30"
-
-              Start-Sleep -Seconds 2
-          }
-
-          if (-not $ok) {
-
-              Write-Host "MEmu process not detected."
-
-              & $env:MEMUC listvms 2>&1 |
-                Out-Host
-
-              throw "MEmu failed to start."
-          }
-
-
-      # ============================================================
-      # TAILSCALE
+      # INSTALL TAILSCALE
       # ============================================================
       - name: Install Tailscale
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "============================================================"
+          Write-Host " INSTALLING TAILSCALE"
+          Write-Host "============================================================"
+
           $installer = "$env:TEMP\tailscale.msi"
 
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+
           Invoke-WebRequest `
-            "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" `
+            -Uri $url `
             -OutFile $installer `
             -UseBasicParsing
 
+          if (-not (Test-Path $installer)) {
+              throw "Tailscale installer download failed."
+          }
+
           Start-Process `
-            msiexec.exe `
+            -FilePath "msiexec.exe" `
             -ArgumentList `
               "/i",
               "`"$installer`"",
@@ -539,27 +858,33 @@ jobs:
             -Force `
             -ErrorAction SilentlyContinue
 
-          if (-not (
-            Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe"
-          )) {
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $ts)) {
               throw "Tailscale installation failed."
           }
 
+          Write-Host "Tailscale installed."
+
 
       # ============================================================
-      # TAILSCALE CONNECT
+      # CONNECT TAILSCALE
       # ============================================================
-      - name: Connect Tailscale
+      - name: Establish Tailscale Connection
         shell: powershell
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "============================================================"
+          Write-Host " CONNECTING TAILSCALE"
+          Write-Host "============================================================"
+
           if ([string]::IsNullOrWhiteSpace(
             $env:TAILSCALE_AUTH_KEY
           )) {
-              throw "TAILSCALE_AUTH_KEY secret missing."
+              throw "TAILSCALE_AUTH_KEY secret is missing."
           }
 
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
@@ -572,47 +897,66 @@ jobs:
               throw "Tailscale connection failed."
           }
 
-          $ip = $null
+          $tsIP = $null
 
-          for ($i = 1; $i -le 20; $i++) {
+          for ($i = 1; $i -le 15; $i++) {
 
-              $ip = (
+              $tsIP = (
                 & $ts ip -4 2>$null |
                 Select-Object -First 1
               ).Trim()
 
-              if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$') {
+              if (
+                $tsIP -match `
+                '^\d{1,3}(\.\d{1,3}){3}$'
+              ) {
                   break
               }
+
+              Write-Host "Waiting for Tailscale IP... $i/15"
 
               Start-Sleep -Seconds 2
           }
 
-          if ($ip -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-              throw "Tailscale IP unavailable."
+          if (
+            $tsIP -notmatch `
+            '^\d{1,3}(\.\d{1,3}){3}$'
+          ) {
+              throw "Tailscale IP was not assigned."
           }
 
-          "TAILSCALE_IP=$ip" |
+          "TAILSCALE_IP=$tsIP" |
             Out-File `
-              $env:GITHUB_ENV `
+              -FilePath $env:GITHUB_ENV `
               -Encoding utf8 `
               -Append
 
-          Write-Host "Tailscale IP: $ip"
+          Write-Host ""
+          Write-Host "Tailscale IP: $tsIP"
 
 
       # ============================================================
-      # RDP VERIFY
+      # VERIFY RDP
       # ============================================================
-      - name: Verify RDP
+      - name: Verify RDP Accessibility
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
-          $service = Get-Service TermService
+          Write-Host "============================================================"
+          Write-Host " VERIFYING RDP"
+          Write-Host "============================================================"
+
+          $service = Get-Service `
+            -Name "TermService"
 
           if ($service.Status -ne "Running") {
-              Start-Service TermService
+
+              Write-Host "Starting TermService..."
+
+              Start-Service `
+                -Name "TermService"
+
               Start-Sleep -Seconds 2
           }
 
@@ -622,16 +966,29 @@ jobs:
             -ErrorAction SilentlyContinue
 
           if (-not $listener) {
-              throw "RDP 3389 is not listening."
+              throw "RDP port 3389 is not listening."
           }
 
-          Write-Host "RDP is ready."
+          Write-Host "RDP 3389 is listening."
+
+          $test = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Host "Local RDP listener exists, but Tailscale self-test failed."
+              Write-Host "This does not necessarily mean remote RDP is unavailable."
+          }
+          else {
+              Write-Host "RDP TCP test successful."
+          }
 
 
       # ============================================================
-      # FINAL
+      # FINAL ACCESS INFORMATION
       # ============================================================
-      - name: Show Access
+      - name: Show RDP Access
         shell: powershell
         run: |
           Write-Host ""
@@ -639,17 +996,17 @@ jobs:
           Write-Host "              RDP + MEMU READY"
           Write-Host "============================================================"
           Write-Host ""
-          Write-Host "Address  : $env:TAILSCALE_IP"
-          Write-Host "Port     : 3389"
-          Write-Host "Username : RDP"
-          Write-Host "Password : $env:RDP_PASSWORD"
+          Write-Host "RDP Address : $env:TAILSCALE_IP"
+          Write-Host "RDP Port    : 3389"
+          Write-Host "Username    : RDP"
+          Write-Host "Password    : $env:RDP_PASSWORD"
           Write-Host ""
-          Write-Host "MEmu:"
-          Write-Host "CPU      : 4"
-          Write-Host "RAM      : 4096 MB"
-          Write-Host "Display  : 1280x720"
-          Write-Host "DPI      : 160"
-          Write-Host "Priority : High"
+          Write-Host "MEmu Configuration:"
+          Write-Host "CPU         : 4"
+          Write-Host "RAM         : 4096 MB"
+          Write-Host "Resolution  : 1280 x 720"
+          Write-Host "DPI         : 160"
+          Write-Host "Priority    : High"
           Write-Host ""
           Write-Host "============================================================"
 
@@ -657,9 +1014,14 @@ jobs:
       # ============================================================
       # KEEP ALIVE
       # ============================================================
-      - name: Keep RDP And MEmu Alive
+      - name: Maintain RDP + MEmu
         shell: powershell
         run: |
+          Write-Host ""
+          Write-Host "============================================================"
+          Write-Host " RDP + MEMU KEEP-ALIVE"
+          Write-Host "============================================================"
+
           while ($true) {
 
               $rdp = Get-NetTCPConnection `
@@ -672,24 +1034,35 @@ jobs:
                 -ErrorAction SilentlyContinue
 
               if ($rdp) {
-                  Write-Host "RDP  : ACTIVE"
+                  Write-Host "[$(Get-Date -Format HH:mm:ss)] RDP  : ACTIVE"
               }
               else {
-                  Write-Host "RDP  : DOWN"
+                  Write-Host "[$(Get-Date -Format HH:mm:ss)] RDP  : DOWN"
               }
 
               if ($memu) {
-                  Write-Host "MEmu : RUNNING"
+
+                  Write-Host "[$(Get-Date -Format HH:mm:ss)] MEmu : RUNNING"
 
                   foreach ($p in $memu) {
+
                       try {
                           $p.PriorityClass = "High"
                       }
                       catch {}
                   }
+
               }
               else {
-                  Write-Host "MEmu : DOWN"
+
+                  Write-Host "[$(Get-Date -Format HH:mm:ss)] MEmu : NOT RUNNING"
+                  Write-Host "Attempting MEmu restart..."
+
+                  & $env:MEMUC `
+                    start `
+                    -i 0 `
+                    2>&1 |
+                    Out-Host
               }
 
               Start-Sleep -Seconds 60
