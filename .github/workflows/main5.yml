@@ -1,238 +1,701 @@
-name: Windows Gaming RDP
+name: RDP + MEmu Play
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  rdp:
-    runs-on: windows-2025
-    timeout-minutes: 350
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
 
     steps:
 
-      # ==========================================
-      # ENABLE RDP
-      # ==========================================
-      - name: Enable Remote Desktop
+      # ============================================================
+      # 1. WINDOWS RDP CONFIGURATION
+      # ============================================================
+      - name: Configure RDP
         shell: powershell
         run: |
-          Write-Host "=========================================="
-          Write-Host " Enabling Windows Remote Desktop"
-          Write-Host "=========================================="
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== Configuring Windows RDP ==="
 
           Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" `
-            -Value 0
-
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" `
-            -Value 1
-
-          Enable-NetFirewallRule `
-            -DisplayGroup "Remote Desktop"
-
-          Set-Service `
-            -Name TermService `
-            -StartupType Automatic
-
-          Start-Service `
-            -Name TermService `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "RDP enabled."
-
-      # ==========================================
-      # CREATE GAMER USER
-      # ==========================================
-      - name: Create RDP User
-        shell: powershell
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
-
-          Write-Host "=========================================="
-          Write-Host " Creating RDP User"
-          Write-Host "=========================================="
-
-          $username = "gamer"
-
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-              throw "RDP_PASSWORD GitHub Secret is missing or empty."
-          }
-
-          $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD `
-            -AsPlainText `
-            -Force
-
-          $existingUser = Get-LocalUser `
-            -Name $username `
-            -ErrorAction SilentlyContinue
-
-          if ($null -eq $existingUser) {
-
-              New-LocalUser `
-                -Name $username `
-                -Password $securePassword `
-                -AccountNeverExpires `
-                -PasswordNeverExpires `
-                -Description "Gaming RDP User"
-
-              Write-Host "User created."
-
-          } else {
-
-              Set-LocalUser `
-                -Name $username `
-                -Password $securePassword
-
-              Write-Host "Existing user password updated."
-          }
-
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member $username `
-            -ErrorAction SilentlyContinue
-
-          Add-LocalGroupMember `
-            -Group "Administrators" `
-            -Member $username `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "RDP user configured."
-
-      # ==========================================
-      # RDP PERFORMANCE
-      # ==========================================
-      - name: Optimize RDP
-        shell: powershell
-        run: |
-
-          Write-Host "=========================================="
-          Write-Host " Optimizing Windows RDP"
-          Write-Host "=========================================="
-
-          # Disable wallpaper
-          Set-ItemProperty `
-            -Path "HKCU:\Control Panel\Desktop" `
-            -Name Wallpaper `
-            -Value ""
-
-          # Reduce visual effects
-          New-ItemProperty `
-            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
-            -Name VisualFXSetting `
-            -PropertyType DWORD `
-            -Value 2 `
-            -Force
-
-          # Prefer RDP UDP
-          New-ItemProperty `
-            -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
-            -Name fClientDisableUDP `
-            -PropertyType DWORD `
             -Value 0 `
             -Force
 
-          # High performance power plan
-          powercfg /setactive SCHEME_MIN
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
 
-          Write-Host "Optimization complete."
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" `
+            -Value 0 `
+            -Force
 
-      # ==========================================
-      # CONNECT TAILSCALE
-      # ==========================================
-      - name: Connect Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
 
-      # ==========================================
-      # GET TAILSCALE IP
-      # ==========================================
-      - name: Show RDP Connection
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+
+          Restart-Service TermService -Force
+
+          Write-Host "RDP configured successfully."
+
+
+      # ============================================================
+      # 2. CREATE RDP USER
+      # ============================================================
+      - name: Create RDP User
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
 
-          Write-Host ""
-          Write-Host "===================================================="
-          Write-Host "             WINDOWS GAMING RDP READY"
-          Write-Host "===================================================="
+          $password = "${{ secrets.MY_RDP_PASSWORD }}"
 
-          $ip = (tailscale ip -4).Trim()
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              $password = "SecurePass@2026!"
+              Write-Host "MY_RDP_PASSWORD secret not found."
+              Write-Host "Using fallback password."
+          }
 
-          Write-Host ""
-          Write-Host "RDP ADDRESS:"
-          Write-Host $ip
+          $securePass = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
 
-          Write-Host ""
-          Write-Host "USERNAME:"
-          Write-Host "gamer"
+          $existing = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
 
-          Write-Host ""
-          Write-Host "PORT:"
-          Write-Host "3389"
+          if ($existing) {
+              Write-Host "RDP user already exists."
+              Set-LocalUser `
+                -Name "RDP" `
+                -Password $securePass
+          }
+          else {
+              New-LocalUser `
+                -Name "RDP" `
+                -Password $securePass `
+                -AccountNeverExpires `
+                -PasswordNeverExpires
+          }
 
-          Write-Host ""
-          Write-Host "===================================================="
-          Write-Host " Use Microsoft Remote Desktop"
-          Write-Host "===================================================="
-          Write-Host ""
-
-      # ==========================================
-      # VERIFY RDP
-      # ==========================================
-      - name: Verify RDP
-        shell: powershell
-        run: |
-
-          Write-Host "Checking RDP service..."
-
-          Get-Service TermService
-
-          Write-Host ""
-          Write-Host "Checking port 3389..."
-
-          Get-NetTCPConnection `
-            -LocalPort 3389 `
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "RDP" `
             -ErrorAction SilentlyContinue
 
-          Write-Host ""
-          Write-Host "Checking Tailscale..."
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
 
-          tailscale status
+          "RDP_PASSWORD=$password" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
 
-          Write-Host ""
-          Write-Host "RDP verification complete."
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              throw "RDP user creation failed."
+          }
 
-      # ==========================================
-      # KEEP RUNNER ALIVE
-      # ==========================================
-      - name: Keep RDP Alive
+          Write-Host "RDP user ready."
+
+
+      # ============================================================
+      # 3. WINDOWS PERFORMANCE OPTIMIZATION
+      # ============================================================
+      - name: Optimize Windows for MEmu
         shell: powershell
         run: |
+          $ErrorActionPreference = "Continue"
 
+          Write-Host "=== Optimizing Windows ==="
+
+          # High performance power plan
+          powercfg /setactive SCHEME_MIN 2>$null
+
+          # Disable Windows animations for the RDP session
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
+            /v VisualFXSetting `
+            /t REG_DWORD `
+            /d 2 `
+            /f | Out-Null
+
+          # Disable transparency
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" `
+            /v EnableTransparency `
+            /t REG_DWORD `
+            /d 0 `
+            /f | Out-Null
+
+          # Reduce RDP visual overhead
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+            /v fDisableWallpaper `
+            /t REG_DWORD `
+            /d 1 `
+            /f | Out-Null
+
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+            /v fDisableFullWindowDrag `
+            /t REG_DWORD `
+            /d 1 `
+            /f | Out-Null
+
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+            /v fDisableMenuAnims `
+            /t REG_DWORD `
+            /d 1 `
+            /f | Out-Null
+
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
+            /v fDisableThemes `
+            /t REG_DWORD `
+            /d 1 `
+            /f | Out-Null
+
+          Write-Host "Windows performance tuning completed."
+
+
+      # ============================================================
+      # 4. DOWNLOAD MEmu
+      # ============================================================
+      - name: Download MEmu Play
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $downloadPage = "https://www.memuplay.com/download.html"
+          $installer = "$env:TEMP\memu-installer.exe"
+
+          Write-Host "Opening official MEmu download page..."
+
+          try {
+              $html = Invoke-WebRequest `
+                -Uri $downloadPage `
+                -UseBasicParsing
+
+              $links = $html.Links |
+                Where-Object {
+                    $_.href -match '\.exe($|\?)' -and
+                    $_.href -match 'memu|microvirt'
+                }
+
+              $url = $links |
+                Select-Object -First 1 -ExpandProperty href
+
+              if ([string]::IsNullOrWhiteSpace($url)) {
+                  throw "Could not find official MEmu installer automatically."
+              }
+
+              if ($url -notmatch '^https?://') {
+                  $url = "https://www.memuplay.com$url"
+              }
+
+              Write-Host "Installer URL:"
+              Write-Host $url
+
+              Invoke-WebRequest `
+                -Uri $url `
+                -OutFile $installer `
+                -UseBasicParsing
+
+          }
+          catch {
+              Write-Host "Automatic download discovery failed."
+              Write-Host $_.Exception.Message
+              throw
+          }
+
+          if (-not (Test-Path $installer)) {
+              throw "MEmu installer was not downloaded."
+          }
+
+          $size = (Get-Item $installer).Length
+
+          if ($size -lt 1000000) {
+              throw "Downloaded MEmu installer looks invalid."
+          }
+
+          Write-Host "MEmu installer downloaded."
+          Write-Host "Size: $size bytes"
+
+          "MEMU_INSTALLER=$installer" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+
+      # ============================================================
+      # 5. INSTALL MEmu
+      # ============================================================
+      - name: Install MEmu Play
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $installer = $env:MEMU_INSTALLER
+
+          Write-Host "=== Installing MEmu Play ==="
+
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList "/S" `
+            -Wait `
+            -PassThru
+
+          Write-Host "Installer exit code: $($process.ExitCode)"
+
+          if ($process.ExitCode -ne 0) {
+              Write-Host "Silent installation failed."
+              Write-Host "Trying normal installer launch..."
+
+              Start-Process `
+                -FilePath $installer `
+                -Wait
+          }
+
+          $possiblePaths = @(
+              "$env:ProgramFiles\Microvirt\MEmu",
+              "${env:ProgramFiles(x86)}\Microvirt\MEmu",
+              "$env:ProgramFiles\Microvirt\MEmuHyperv",
+              "${env:ProgramFiles(x86)}\Microvirt\MEmuHyperv"
+          )
+
+          $memuPath = $null
+
+          foreach ($path in $possiblePaths) {
+              if (Test-Path $path) {
+                  $memuPath = $path
+                  break
+              }
+          }
+
+          if (-not $memuPath) {
+              $found = Get-ChildItem `
+                -Path "C:\Program Files","C:\Program Files (x86)" `
+                -Directory `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.FullName -match '\\Microvirt\\MEmu'
+                } |
+                Select-Object -First 1
+
+              if ($found) {
+                  $memuPath = $found.FullName
+              }
+          }
+
+          if (-not $memuPath) {
+              throw "MEmu installation directory was not found."
+          }
+
+          Write-Host "MEmu path: $memuPath"
+
+          "MEMU_PATH=$memuPath" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+
+      # ============================================================
+      # 6. FIND MEMUC / MEmuConsole
+      # ============================================================
+      - name: Locate MEmu Command Tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $roots = @(
+              $env:MEMU_PATH,
+              "$env:ProgramFiles\Microvirt",
+              "${env:ProgramFiles(x86)}\Microvirt"
+          )
+
+          $memuc = $null
+          $console = $null
+
+          foreach ($root in $roots) {
+
+              if (-not $root) {
+                  continue
+              }
+
+              if (-not $memuc) {
+                  $candidate = Get-ChildItem `
+                    -Path $root `
+                    -Filter "memuc.exe" `
+                    -File `
+                    -Recurse `
+                    -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                  if ($candidate) {
+                      $memuc = $candidate.FullName
+                  }
+              }
+
+              if (-not $console) {
+                  $candidate = Get-ChildItem `
+                    -Path $root `
+                    -Filter "MEmuConsole.exe" `
+                    -File `
+                    -Recurse `
+                    -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                  if ($candidate) {
+                      $console = $candidate.FullName
+                  }
+              }
+          }
+
+          if ($memuc) {
+              Write-Host "MEMUC: $memuc"
+              "MEMUC=$memuc" |
+                Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+          }
+
+          if ($console) {
+              Write-Host "MEmuConsole: $console"
+              "MEMU_CONSOLE=$console" |
+                Out-File `
+                  -FilePath $env:GITHUB_ENV `
+                  -Encoding utf8 `
+                  -Append
+          }
+
+          if (-not $memuc -and -not $console) {
+              throw "MEmu command tools were not found."
+          }
+
+
+      # ============================================================
+      # 7. CREATE / CONFIGURE MEmu INSTANCE
+      # ============================================================
+      - name: Configure MEmu for Performance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== Configuring MEmu ==="
+
+          if ($env:MEMUC) {
+
+              Write-Host "Using MEMUC."
+
+              # Create default VM if none exists
+              & $env:MEMUC listvms 2>&1 |
+                Out-Host
+
+              $existing = & $env:MEMUC listvms 2>$null
+
+              if (-not $existing -or
+                  ($existing -notmatch "MEmu")) {
+
+                  Write-Host "Creating MEmu instance..."
+
+                  & $env:MEMUC create
+
+                  Start-Sleep -Seconds 5
+              }
+
+              # First instance = index 0
+              $vm = 0
+
+              Write-Host "Applying CPU configuration..."
+              & $env:MEMUC setconfigex -i $vm cpus 4 2>&1 |
+                Out-Host
+
+              Write-Host "Applying RAM configuration..."
+              & $env:MEMUC setconfigex -i $vm memory 4096 2>&1 |
+                Out-Host
+
+              # 1280x720 / 160 DPI
+              Write-Host "Applying display configuration..."
+              & $env:MEMUC setconfigex -i $vm custom_resolution "1280 720 160" 2>&1 |
+                Out-Host
+
+              # Fixed resolution prevents unnecessary resizing work
+              & $env:MEMUC setconfigex -i $vm disable_resize 1 2>&1 |
+                Out-Host
+
+              Write-Host "MEmu VM performance configuration applied."
+          }
+          else {
+              Write-Host "MEMUC not available."
+              Write-Host "Using MEmuConsole fallback."
+
+              if ($env:MEMU_CONSOLE) {
+                  & $env:MEMU_CONSOLE create 2>&1 |
+                    Out-Host
+              }
+          }
+
+
+      # ============================================================
+      # 8. START MEmu
+      # ============================================================
+      - name: Start MEmu
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== Starting MEmu ==="
+
+          if ($env:MEMUC) {
+
+              & $env:MEMUC start -i 0 2>&1 |
+                Out-Host
+
+          }
+          elseif ($env:MEMU_CONSOLE) {
+
+              Start-Process `
+                -FilePath $env:MEMU_CONSOLE `
+                -ArgumentList "MEmu"
+
+          }
+          else {
+              throw "No MEmu startup command available."
+          }
+
+          Start-Sleep -Seconds 15
+
+          Write-Host "MEmu startup requested."
+
+
+      # ============================================================
+      # 9. MEmu PROCESS PRIORITY
+      # ============================================================
+      - name: Boost MEmu Process Priority
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host "=== Boosting MEmu priority ==="
+
+          $names = @(
+              "MEmu",
+              "MEmuHeadless",
+              "MEmuConsole",
+              "MEmuSVC",
+              "MEmuHyperv",
+              "MEmuVM"
+          )
+
+          foreach ($name in $names) {
+
+              Get-Process -Name $name -ErrorAction SilentlyContinue |
+                ForEach-Object {
+
+                    try {
+                        $_.PriorityClass = "High"
+                        Write-Host "High priority: $($_.ProcessName) PID=$($_.Id)"
+                    }
+                    catch {
+                        Write-Host "Could not change priority for $($_.ProcessName)"
+                    }
+                }
+          }
+
+
+      # ============================================================
+      # 10. TAILSCALE INSTALL
+      # ============================================================
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Write-Host "Downloading Tailscale..."
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath `
+            -UseBasicParsing
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
+          Remove-Item `
+            $installerPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          if (-not (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe")) {
+              throw "Tailscale installation failed."
+          }
+
+          Write-Host "Tailscale installed."
+
+
+      # ============================================================
+      # 11. TAILSCALE CONNECTION
+      # ============================================================
+      - name: Establish Tailscale Connection
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+              throw "TAILSCALE_AUTH_KEY GitHub Secret is missing."
+          }
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          Write-Host "Connecting to Tailscale..."
+
+          & $tailscale up `
+            "--authkey=$env:TAILSCALE_AUTH_KEY" `
+            "--hostname=gh-runner-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tailscale connection failed."
+          }
+
+          $tsIP = $null
+
+          for ($i = 1; $i -le 20; $i++) {
+
+              $tsIP = (& $tailscale ip -4 2>$null |
+                Select-Object -First 1).Trim()
+
+              if ($tsIP -match '^\d+\.\d+\.\d+\.\d+$') {
+                  break
+              }
+
+              Write-Host "Waiting for Tailscale IP... $i/20"
+              Start-Sleep -Seconds 3
+          }
+
+          if ($tsIP -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+              throw "Tailscale IPv4 address was not assigned."
+          }
+
+          Write-Host "Tailscale IPv4: $tsIP"
+
+          "TAILSCALE_IP=$tsIP" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+
+      # ============================================================
+      # 12. VERIFY RDP SERVICE
+      # ============================================================
+      - name: Verify RDP Service
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== Verifying RDP ==="
+
+          $service = Get-Service TermService
+
+          Write-Host "TermService status: $($service.Status)"
+
+          if ($service.Status -ne "Running") {
+              Start-Service TermService
+              Start-Sleep -Seconds 3
+          }
+
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if (-not $listener) {
+              throw "RDP port 3389 is not listening."
+          }
+
+          Write-Host "RDP 3389 is listening."
+
+
+      # ============================================================
+      # 13. FINAL ACCESS INFORMATION
+      # ============================================================
+      - name: Show RDP Access
+        shell: powershell
+        run: |
           Write-Host ""
-          Write-Host "===================================================="
-          Write-Host "              RDP SERVER IS RUNNING"
-          Write-Host "===================================================="
+          Write-Host "============================================================"
+          Write-Host "                 RDP + MEmu READY"
+          Write-Host "============================================================"
+          Write-Host "RDP Address : $env:TAILSCALE_IP"
+          Write-Host "RDP Port    : 3389"
+          Write-Host "Username    : RDP"
+          Write-Host "Password    : $env:RDP_PASSWORD"
           Write-Host ""
-          Write-Host "Username : gamer"
-          Write-Host "Port     : 3389"
+          Write-Host "MEmu target:"
+          Write-Host "CPU         : 4 cores"
+          Write-Host "RAM         : 4096 MB"
+          Write-Host "Resolution  : 1280x720"
+          Write-Host "DPI         : 160"
+          Write-Host "Priority    : High"
+          Write-Host "============================================================"
           Write-Host ""
-          Write-Host "Keep this workflow running while using RDP."
-          Write-Host ""
+
+
+      # ============================================================
+      # 14. KEEP RUNNER ALIVE
+      # ============================================================
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          Write-Host "RDP + MEmu is running."
 
           while ($true) {
 
-              $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+              $rdp = Get-NetTCPConnection `
+                -LocalPort 3389 `
+                -State Listen `
+                -ErrorAction SilentlyContinue
 
-              Write-Host "$time - Windows RDP alive"
+              $memu = Get-Process `
+                -Name "MEmu","MEmuHeadless","MEmuVM" `
+                -ErrorAction SilentlyContinue
 
-              Start-Sleep -Seconds 60
+              Write-Host ""
+              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]"
+
+              if ($rdp) {
+                  Write-Host "RDP: ACTIVE"
+              }
+              else {
+                  Write-Host "RDP: NOT LISTENING"
+              }
+
+              if ($memu) {
+                  Write-Host "MEmu: RUNNING"
+              }
+              else {
+                  Write-Host "MEmu: NOT RUNNING"
+              }
+
+              Start-Sleep -Seconds 300
           }
